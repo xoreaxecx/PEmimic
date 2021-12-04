@@ -11,10 +11,10 @@ A python tool that allows you to mimic one executable file into another.
 
 ---
 
-Before:
+Before:  
 ![sample before](https://github.com/xoreaxecx/PEmimic/blob/main/sample_before.png)
 
-After:
+After:  
 ![sample after](https://github.com/xoreaxecx/PEmimic/blob/main/sample_after.png)
 
 ---
