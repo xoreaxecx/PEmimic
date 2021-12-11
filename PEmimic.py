@@ -286,7 +286,7 @@ class Options:
     search_stamp = True
     search_sign = True
     search_vi = True
-    search_pdb = True
+    search_dbg = True
     search_res = True
 
     @staticmethod
@@ -295,7 +295,7 @@ class Options:
         Options.search_stamp = True
         Options.search_sign = True
         Options.search_vi = True
-        Options.search_pdb = True
+        Options.search_dbg = True
         Options.search_res = True
 
     @staticmethod
@@ -304,12 +304,12 @@ class Options:
         Options.search_stamp = False
         Options.search_sign = False
         Options.search_vi = False
-        Options.search_pdb = False
+        Options.search_dbg = False
         Options.search_res = False
 
     @staticmethod
     def get_count():
-        return Options.search_rich + Options.search_stamp + Options.search_sign + Options.search_vi + Options.search_pdb + Options.search_res
+        return Options.search_rich + Options.search_stamp + Options.search_sign + Options.search_vi + Options.search_dbg + Options.search_res
 
     @staticmethod
     def get_string_options():
@@ -322,8 +322,8 @@ class Options:
             options.append('sign')
         if Options.search_vi:
             options.append('vi')
-        if Options.search_pdb:
-            options.append('pdb')
+        if Options.search_dbg:
+            options.append('dbg')
         if Options.search_res:
             options.append('res')
         return '-'.join(options)
@@ -544,7 +544,7 @@ class MimicPart:
 
 
 class MimicPE:
-    def __init__(self, path_to_file, sections, rich, stamp, sign, pdbs, res, section_alignment=None, file_alignment=None):
+    def __init__(self, path_to_file, sections, rich, stamp, sign, dbgs, res, section_alignment=None, file_alignment=None):
         self.path = path_to_file
         self.name = os.path.splitext(os.path.split(path_to_file)[1])[0]
         self.ext = os.path.splitext(os.path.split(path_to_file)[1])[1]
@@ -552,7 +552,7 @@ class MimicPE:
         self.rich = rich
         self.stamp = stamp
         self.sign = sign
-        self.pdbs = pdbs
+        self.dbgs = dbgs
         self.res = res
         self.section_alignment = section_alignment
         self.file_alignment = file_alignment
@@ -564,7 +564,7 @@ class MimicPE:
             return False
 
     def count(self):
-        return int(self.rich is not None) + int(self.stamp is not None) + int(self.sign is not None) + int(self.pdbs is not None)
+        return int(self.rich is not None) + int(self.stamp is not None) + int(self.sign is not None) + int(self.dbgs is not None)
 
 
 class RichParsed:
@@ -1097,7 +1097,7 @@ def fix_rich_checksum(data, start_offset, rich: RichParsed, e_lfanew):
         rich.update_key()
 
 
-def get_pdb(data, e_lfanew, is_64, sections, eof, checking_original=False):
+def get_dbg(data, e_lfanew, is_64, sections, eof, checking_original=False):
     if is_64:
         hdr_offset = e_lfanew + 184  # Debug Directory if PE32+: e_lfanew + 4 + 20 + 160
     else:
@@ -1105,7 +1105,7 @@ def get_pdb(data, e_lfanew, is_64, sections, eof, checking_original=False):
     struct_vaddr = int.from_bytes(data[hdr_offset:hdr_offset + 4], 'little')
     if struct_vaddr == 0:
         if checking_original:
-            message = 'Original file does not contain PDB.'
+            message = 'Original file does not contain Debug Directory.'
             print(f'{Back.CYAN}{message}{Back.RESET}')
             Log.write(message)
         return None
@@ -1115,7 +1115,7 @@ def get_pdb(data, e_lfanew, is_64, sections, eof, checking_original=False):
     struct_full_size = int.from_bytes(data[hdr_offset + 4:hdr_offset + 8], 'little')
     if struct_offset <= 0 or struct_offset >= eof or struct_full_size == 0 or struct_full_size % 28 != 0:
         if checking_original:
-            message = f'Original file contains invalid PDB struct.\n' \
+            message = f'Original file contains invalid Debug Directory struct.\n' \
                       f'Struct VA:        {struct_vaddr}.\n' \
                       f'Struct offset:    {struct_offset}.\n' \
                       f'Struct full size: {struct_full_size}.'
@@ -1123,20 +1123,20 @@ def get_pdb(data, e_lfanew, is_64, sections, eof, checking_original=False):
         return None
     struct_count = int.from_bytes(data[hdr_offset + 4:hdr_offset + 8], 'little') // 28
 
-    pdbs = []
+    dbgs = []
     while struct_count > 0:
         check_start = int.from_bytes(data[struct_offset:struct_offset + 4], 'little')
         data_offset = int.from_bytes(data[struct_offset + 24:struct_offset + 28], 'little')
         data_size = int.from_bytes(data[struct_offset + 16:struct_offset + 20], 'little')
         if check_start != 0 or data_offset == 0 or data_offset >= eof or data_size == 0 or data_size >= eof:
             if checking_original:
-                message = f'Original file contains invalid PDB entry at {hex(struct_offset)}.\n' \
+                message = f'Original file contains invalid Debug Directory entry at {hex(struct_offset)}.\n' \
                           f'Entry check bytes: {check_start}.\n' \
                           f'Entry PointerToRawData: {data_offset}.\n' \
                           f'Entry SizeOfData: {data_size}.'
                 continue_or_exit_msg(message)
             return None
-        pdbs.append(MimicPart(hdr_offset=hdr_offset,
+        dbgs.append(MimicPart(hdr_offset=hdr_offset,
                               hdr_size=8,
                               struct_offset=struct_offset,
                               struct_size=28,
@@ -1144,7 +1144,7 @@ def get_pdb(data, e_lfanew, is_64, sections, eof, checking_original=False):
                               data_size=data_size))
         struct_count -= 1
         struct_offset += 28
-    return pdbs
+    return dbgs
 
 
 def get_stamp(data, e_lfanew, checking_original=False):
@@ -1304,13 +1304,13 @@ def check_args(args):
     if args.depth < 0:
         exit_program(f'Invalid value for "-d": {args.d}.')
 
-    if args.no_rich and args.no_timePE and args.no_sign and args.no_vi and args.no_pdb:
+    if args.no_rich and args.no_timePE and args.no_sign and args.no_vi and args.no_dbg:
         exit_program('All attributes removed, nothing to search.')
 
     warnings = []
     if args.rich and args.no_rich:
         warnings.append(f'{Back.RED}"-no-rich"{Back.RESET} \tcannot be used at the same time with {Back.GREEN}"-rich"{Back.RESET}.')
-    if args.no_rich_fix and args.no_rich or (args.no_rich_fix and not args.rich and any([args.timePE, args.sign, args.vi, args.pdb, args.res])):
+    if args.no_rich_fix and args.no_rich or (args.no_rich_fix and not args.rich and any([args.timePE, args.sign, args.vi, args.dbg, args.res])):
         warnings.append(f'{Back.RED}"-no-rich-fix"{Back.RESET} \tcannot be used without {Back.GREEN}"-rich"{Back.RESET}.')
     if args.timePE and args.no_timePE:
         warnings.append(f'{Back.RED}"-no-timePE"{Back.RESET} \tcannot be used at the same time with {Back.GREEN}"-timePE"{Back.RESET}.')
@@ -1318,8 +1318,8 @@ def check_args(args):
         warnings.append(f'{Back.RED}"-no-sign"{Back.RESET} \tcannot be used at the same time with {Back.RED}"-sign"{Back.RESET}.')
     if args.vi and args.no_vi:
         warnings.append(f'{Back.RED}"-no-vi"{Back.RESET} \tcannot be used at the same time with {Back.GREEN}"-vi"{Back.RESET}.')
-    if args.pdb and args.no_pdb:
-        warnings.append(f'{Back.RED}"-no-pdb"{Back.RESET} \tcannot be used at the same time with {Back.GREEN}"-pdb"{Back.RESET}.')
+    if args.dbg and args.no_dbg:
+        warnings.append(f'{Back.RED}"-no-dbg"{Back.RESET} \tcannot be used at the same time with {Back.GREEN}"-dbg"{Back.RESET}.')
     if args.res and args.no_res:
         warnings.append(f'{Back.RED}"-no-res"{Back.RESET} \tcannot be used at the same time with {Back.GREEN}"-res"{Back.RESET}.')
 
@@ -1336,12 +1336,12 @@ def check_args(args):
 
 
 def set_options(args):
-    if (args.rich and args.timePE and args.sign and args.vi and args.pdb and args.res) \
-            or (not args.rich and not args.timePE and not args.sign and not args.vi and not args.pdb and not args.res
-                and not args.no_rich and not args.no_timePE and not args.no_sign and not args.no_vi and not args.no_pdb and not args.no_res):
+    if (args.rich and args.timePE and args.sign and args.vi and args.dbg and args.res) \
+            or (not args.rich and not args.timePE and not args.sign and not args.vi and not args.dbg and not args.res
+                and not args.no_rich and not args.no_timePE and not args.no_sign and not args.no_vi and not args.no_dbg and not args.no_res):
         return
 
-    if args.rich or args.timePE or args.sign or args.vi or args.pdb or args.res:
+    if args.rich or args.timePE or args.sign or args.vi or args.dbg or args.res:
         Options.disable_all()
         if args.rich:
             Options.search_rich = True
@@ -1351,8 +1351,8 @@ def set_options(args):
             Options.search_sign = True
         if args.vi:
             Options.search_vi = True
-        if args.pdb:
-            Options.search_pdb = True
+        if args.dbg:
+            Options.search_dbg = True
         if args.res:
             Options.search_res = True
     else:
@@ -1364,8 +1364,8 @@ def set_options(args):
             Options.search_sign = False
         if args.no_vi:
             Options.search_vi = False
-        if args.no_pdb:
-            Options.search_pdb = False
+        if args.no_dbg:
+            Options.search_dbg = False
         if args.no_res:
             Options.search_res = False
     return
@@ -1409,12 +1409,12 @@ def check_original(path_to_file, data, e_lfanew, is_64, orig_eof):
     else:
         orig_rich = None
 
-    if Options.search_pdb:
-        orig_pdbs = get_pdb(data, e_lfanew, is_64, orig_sections, orig_eof, checking_original=True)
-        if orig_pdbs is None:
-            Options.search_pdb = False
+    if Options.search_dbg:
+        orig_dbgs = get_dbg(data, e_lfanew, is_64, orig_sections, orig_eof, checking_original=True)
+        if orig_dbgs is None:
+            Options.search_dbg = False
     else:
-        orig_pdbs = None
+        orig_dbgs = None
 
     if Options.search_res or Options.search_vi:
         orig_res = get_resources(data, e_lfanew, is_64, orig_sections, orig_eof, checking_original=True)
@@ -1452,7 +1452,7 @@ def check_original(path_to_file, data, e_lfanew, is_64, orig_eof):
                    rich=orig_rich,
                    stamp=orig_stamp,
                    sign=orig_sign,
-                   pdbs=orig_pdbs,
+                   dbgs=orig_dbgs,
                    res=orig_res,
                    section_alignment=sec_alignment,
                    file_alignment=fl_alignment)
@@ -1463,26 +1463,26 @@ parser.add_argument('-in', dest='in_file', metavar='path/to/file', required=True
 parser.add_argument('-out', dest='out_dir', metavar='path/to/dir', type=str, default=None, help='path to output dir. "-in" file path is default.')
 parser.add_argument('-sd', metavar='search/dir/path', type=str, default=r'C:\Windows', help='path to directory to search. "C:\\Windows" is default.')
 parser.add_argument('-d', dest='depth', metavar='depth', type=int, default=5, help='directory search depth. 5 is default.')
-parser.add_argument('-limit', metavar='int', type=int, default=0, help='required number of samples to create. 0 means all found variants. 0 is default. ')
+parser.add_argument('-limit', metavar='int', type=int, default=0, help='required number of samples to create. all found variants is default. ')
 parser.add_argument('-approx', action='store_true', help='use of variants with incomplete match.')
-parser.add_argument('-rich', action='store_true', help='adds rich to the search.')
-parser.add_argument('-no-rich-fix', dest='no_rich_fix', action='store_true', help='disable modifying rich values.')
-parser.add_argument('-no-rich', dest='no_rich', action='store_true', help='removes rich from the search.')
+parser.add_argument('-rich', action='store_true', help='adds Rich Header to the search.')
+parser.add_argument('-no-rich-fix', dest='no_rich_fix', action='store_true', help='disable modifying Rich Header values.')
+parser.add_argument('-no-rich', dest='no_rich', action='store_true', help='removes Rich Header from the search.')
 parser.add_argument('-timePE', action='store_true', help='adds TimeDateStamp from File Header to the search.')
 parser.add_argument('-no-timePE', dest='no_timePE', action='store_true', help='removes TimeDateStamp from the search.')
-parser.add_argument('-sign', action='store_true', help='adds sign to the search.')
-parser.add_argument('-no-sign', dest='no_sign', action='store_true', help='removes sign from the search.')
+parser.add_argument('-sign', action='store_true', help='adds file sign to the search.')
+parser.add_argument('-no-sign', dest='no_sign', action='store_true', help='removes file sign from the search.')
 parser.add_argument('-vi', action='store_true', help='adds VersionInfo to the search.')
 parser.add_argument('-no-vi', dest='no_vi', action='store_true', help='removes VersionInfo from the search.')
 parser.add_argument('-res', action='store_true', help='adds resournces to the search.')
 parser.add_argument('-no-res', dest='no_res', action='store_true', help='removes resournces from the search.')
-parser.add_argument('-pdb', action='store_true', help='adds PDB to the search.')
-parser.add_argument('-no-pdb', dest='no_pdb', action='store_true', help='removes PDB from the search.')
+parser.add_argument('-dbg', action='store_true', help='adds Debug Directory to the search.')
+parser.add_argument('-no-dbg', dest='no_dbg', action='store_true', help='removes Debug Directory from the search.')
 parser.add_argument('-ext', metavar='.extension', action='append', default=None,
                     help='file extensions to process. multiple "-ext" supported. Default: ".exe" & ".dll".')
 parser.add_argument('-no-checksum', dest='upd_checksum', action='store_false', help='do not update the checksum.')
 parser.add_argument('-no-names', dest='change_sec_names', action='store_false', help='do not change section names.')
-parser.add_argument('-with-donor', dest='with_donor', action='store_true', help='creates copy of donor in the out directory.')
+parser.add_argument('-with-donor', dest='with_donor', action='store_true', help='creates copy of donor in the "-out" directory.')
 initargs = parser.parse_args()
 
 init()                                                                           # Colorama initialization
@@ -1517,7 +1517,7 @@ for dirpath, dirnames, filenames in os.walk(initargs.sd):
         donor_rich = None
         donor_sign = None
         donor_stamp = None
-        donor_pdbs = None
+        donor_dbgs = None
         donor_res = None
         donor_path = os.path.join(dirpath, filename)
         try:
@@ -1552,9 +1552,9 @@ for dirpath, dirnames, filenames in os.walk(initargs.sd):
             donor_stamp = get_stamp(donor_data, donor_e_lfanew)
             if donor_stamp:
                 score += 1
-        if Options.search_pdb:
-            donor_pdbs = get_pdb(donor_data, donor_e_lfanew, donor_is_64, donor_sections, donor_eof)
-            if donor_pdbs:
+        if Options.search_dbg:
+            donor_dbgs = get_dbg(donor_data, donor_e_lfanew, donor_is_64, donor_sections, donor_eof)
+            if donor_dbgs:
                 score += 1
         if Options.search_res or Options.search_vi:
             donor_res = get_resources(donor_data, donor_e_lfanew, donor_is_64, donor_sections, donor_eof)
@@ -1569,7 +1569,7 @@ for dirpath, dirnames, filenames in os.walk(initargs.sd):
                             rich=donor_rich,
                             stamp=donor_stamp,
                             sign=donor_sign,
-                            pdbs=donor_pdbs,
+                            dbgs=donor_dbgs,
                             res=donor_res)
             new_data = bytearray(orig_data)
             parts = []
@@ -1592,28 +1592,28 @@ for dirpath, dirnames, filenames in os.walk(initargs.sd):
                     donor_data[donor.stamp.struct_offset:donor.stamp.struct_offset + donor.stamp.struct_size] + \
                     new_data[pe.stamp.struct_offset + pe.stamp.struct_size:]
 
-            if Options.search_pdb and donor.pdbs:
-                pe.pdbs.sort(key=operator.attrgetter('data_size'))
-                donor.pdbs.sort(key=operator.attrgetter('data_size'), reverse=True)
+            if Options.search_dbg and donor.dbgs:
+                pe.dbgs.sort(key=operator.attrgetter('data_size'))
+                donor.dbgs.sort(key=operator.attrgetter('data_size'), reverse=True)
                 changed = 0
 
-                for opdb in pe.pdbs:
+                for odbg in pe.dbgs:
                     dpc = 0
-                    while dpc < len(donor.pdbs):
-                        if opdb.fits(donor.pdbs[dpc]):
+                    while dpc < len(donor.dbgs):
+                        if odbg.fits(donor.dbgs[dpc]):
                             changed += 1
-                            dpdb = donor.pdbs.pop(dpc)
-                            if opdb.data_size != dpdb.data_size:
-                                pdb_entry = donor_data[dpdb.struct_offset:dpdb.struct_offset + 20] + new_data[opdb.struct_offset + 20:opdb.struct_offset + 28]
-                                new_data = new_data[:opdb.struct_offset] + pdb_entry + new_data[opdb.struct_offset + opdb.struct_size:]
-                            new_data = new_data[:opdb.data_offset] + \
-                                donor_data[dpdb.data_offset:dpdb.data_offset + dpdb.data_size] + \
-                                b'\x00' * (opdb.data_size - dpdb.data_size) + \
-                                new_data[opdb.data_offset + opdb.data_size:]
+                            ddbg = donor.dbgs.pop(dpc)
+                            if odbg.data_size != ddbg.data_size:
+                                dbg_entry = donor_data[ddbg.struct_offset:ddbg.struct_offset + 20] + new_data[odbg.struct_offset + 20:odbg.struct_offset + 28]
+                                new_data = new_data[:odbg.struct_offset] + dbg_entry + new_data[odbg.struct_offset + odbg.struct_size:]
+                            new_data = new_data[:odbg.data_offset] + \
+                                donor_data[ddbg.data_offset:ddbg.data_offset + ddbg.data_size] + \
+                                b'\x00' * (odbg.data_size - ddbg.data_size) + \
+                                new_data[odbg.data_offset + odbg.data_size:]
                             break
                         else:
                             dpc += 1
-                parts.append(f'pdb_{changed}of{len(pe.pdbs)}')
+                parts.append(f'dbg_{changed}of{len(pe.dbgs)}')
 
             sample_end_of_data = 0
             if (Options.search_res or Options.search_vi) and donor.res:
