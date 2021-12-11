@@ -23,7 +23,7 @@ Help:
 ```
 usage: pemimic.py [-h] -in path/to/file [-out path/to/dir] [-sd search/dir/path] [-d depth] [-limit int] [-approx]
                   [-rich] [-no-rich-fix] [-no-rich] [-timePE] [-no-timePE] [-sign] [-no-sign] [-vi] [-no-vi] [-res]
-                  [-no-res] [-pdb] [-no-pdb] [-ext .extension] [-no-checksum] [-no-names] [-with-donor]
+                  [-no-res] [-dbg] [-no-dbg] [-ext .extension] [-no-checksum] [-no-names] [-with-donor]
 
 By default the script includes all attributes for search.
 
@@ -33,25 +33,25 @@ optional arguments:
   -out path/to/dir     path to output dir. "-in" file path is default.
   -sd search/dir/path  path to directory to search. "C:\Windows" is default.
   -d depth             directory search depth. 5 is default.
-  -limit int           required number of samples to create. 0 means all found variants. 0 is default.
+  -limit int           required number of samples to create. all found variants is default.
   -approx              use of variants with incomplete match.
-  -rich                adds rich to the search.
-  -no-rich-fix         disable modifying rich values.
-  -no-rich             removes rich from the search.
+  -rich                adds Rich Header to the search.
+  -no-rich-fix         disable modifying Rich Header values.
+  -no-rich             removes Rich Header from the search.
   -timePE              adds TimeDateStamp from File Header to the search.
   -no-timePE           removes TimeDateStamp from the search.
-  -sign                adds sign to the search.
-  -no-sign             removes sign from the search.
+  -sign                adds file sign to the search.
+  -no-sign             removes file sign from the search.
   -vi                  adds VersionInfo to the search.
   -no-vi               removes VersionInfo from the search.
   -res                 adds resournces to the search.
   -no-res              removes resournces from the search.
-  -pdb                 adds PDB to the search.
-  -no-pdb              removes PDB from the search.
+  -dbg                 adds Debug Directory to the search.
+  -no-dbg              removes Debug Directory from the search.
   -ext .extension      file extensions to process. multiple "-ext" supported. Default: ".exe" & ".dll".
   -no-checksum         do not update the checksum.
   -no-names            do not change section names.
-  -with-donor          creates copy of donor in the out directory.
+  -with-donor          creates copy of donor in the "-out" directory.
 ```
 
 ---
