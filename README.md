@@ -12,9 +12,7 @@ A python tool that allows you to mimic one executable file to another.
 ---
 
 Due to the low speed of calculating the checksum in python, two versions of the [library](https://github.com/xoreaxecx/ChecksumDll) are included in the project  
-(for [32 bit](https://github.com/xoreaxecx/PEmimic/blob/main/checksum32.dll)  
-and [64 bit](https://github.com/xoreaxecx/PEmimic/blob/main/checksum64.dll) python interpreter). To force the script to use  
-its own function, rename or remove the dll files from the directory.  
+(for [32 bit](https://github.com/xoreaxecx/PEmimic/blob/main/checksum32.dll) and [64 bit](https://github.com/xoreaxecx/PEmimic/blob/main/checksum64.dll) python interpreter). To force the script to use its own function, rename or remove the dll files from the directory.  
 
 ---
 
