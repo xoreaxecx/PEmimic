@@ -1,6 +1,13 @@
 # PEmimic
 A python tool that allows you to mimic one executable file to another.
-
+  
+  
+Installing dependencies:
+```
+pip install colorama
+```
+  
+  
 ### Principle of operation:
 ---
 
@@ -54,9 +61,10 @@ optional arguments:
   -no-res              removes resournces from the search.
   -dbg                 adds Debug Directory to the search.
   -no-dbg              removes Debug Directory from the search.
+  -names               change section names as in the donor.
+  -no-names            do not change section names.
   -ext .extension      file extensions to process. multiple "-ext" supported. Default: ".exe" & ".dll".
   -no-checksum         do not update the checksum.
-  -no-names            do not change section names.
   -with-donor          creates copy of donor in the "-out" directory.
 ```
 
