@@ -34,9 +34,10 @@ After:
 
 Help:
 ```
-usage: pemimic.py [-h] -in path/to/file [-out path/to/dir] [-sd search/dir/path] [-d depth] [-limit int] [-approx]
-                  [-rich] [-no-rich-fix] [-no-rich] [-timePE] [-no-timePE] [-sign] [-no-sign] [-vi] [-no-vi] [-res]
-                  [-no-res] [-dbg] [-no-dbg] [-ext .extension] [-no-checksum] [-no-names] [-with-donor]
+usage: pemimic.py [-h] -in path/to/file [-out path/to/dir] [-sd search/dir/path] 
+                  [-d depth] [-limit int] [-approx] [-rich] [-no-rich-fix] [-no-rich] 
+                  [-timePE] [-no-timePE] [-sign] [-no-sign] [-vi] [-no-vi] [-res] [-no-res] 
+                  [-dbg] [-no-dbg] [-ext .extension] [-no-checksum] [-no-names] [-with-donor]
 
 By default the script includes all attributes for search.
 
