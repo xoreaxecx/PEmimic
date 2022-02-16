@@ -31,6 +31,8 @@ except ImportError:
         CYAN = '['
         RESET = ']'
 
+SEPARATOR = f'{"=" * 80}'
+
 # ---  file counter   ---
 COUNTER = 0
 
@@ -44,6 +46,8 @@ CHECKSUM_64_DLL_NAME = 'checksum64.dll'
 RICH_MARK = b'\x52\x69\x63\x68'  # 1751345490 == 0x68636952 == b'\x52\x69\x63\x68' == b'Rich'
 DANS_MARK_B = 1147235923         # 1147235923 == 0x44616e53 == b'\x44\x61\x6e\x53' == b'DanS' big endian
 DANS_MARK_L = 1399742788         # 1399742788 == 0x536e6144 == b'\x44\x61\x6e\x53' == b'DanS' little endian
+RICH_START_OFFSET = 0x80
+RICH_MIN_SIZE = 40
 KNOWN_PRODUCT_IDS = {
   0: "Unknown",
   1: "Import0",
@@ -298,15 +302,17 @@ class Options:
     search_vi = True
     search_dbg = True
     search_res = True
+    change_names = True
 
     @staticmethod
-    def set_all():
+    def enable_all():
         Options.search_rich = True
         Options.search_stamp = True
         Options.search_sign = True
         Options.search_vi = True
         Options.search_dbg = True
         Options.search_res = True
+        Options.change_names = True
 
     @staticmethod
     def disable_all():
@@ -316,9 +322,10 @@ class Options:
         Options.search_vi = False
         Options.search_dbg = False
         Options.search_res = False
+        Options.change_names = False
 
     @staticmethod
-    def get_count():
+    def get_search_count():
         return Options.search_rich + Options.search_stamp + Options.search_sign + Options.search_vi + Options.search_dbg + Options.search_res
 
     @staticmethod
@@ -336,25 +343,28 @@ class Options:
             options.append('dbg')
         if Options.search_res:
             options.append('res')
+        if Options.change_names:
+            options.append('names')
         return '-'.join(options)
 
 
 class Log:
-    __path = ''
     __file = None
 
     @staticmethod
-    def init(path):
-        # path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'mimic_logs')
-        if not os.path.exists(path) or not os.path.isdir(path):
+    def init(args):
+        global SEPARATOR
+        if not os.path.exists(args.out_dir) or not os.path.isdir(args.out_dir):
             try:
-                os.makedirs(path)
+                os.makedirs(args.out_dir)
             except Exception as e:
                 print(e)
-                exit_program(f'Can not create log directory: {path}')
+                exit_program(f'Can not create log directory: {args.out_dir}')
         log_name = f'_mimic_log_{int(time.time())}_{Options.get_string_options()}.txt'
-        Log.__path = os.path.join(path, log_name)
-        Log.__file = open(Log.__path, 'a', buffering=1)         # 1 means line buffered
+        log_path = os.path.join(args.out_dir, log_name)
+        Log.__file = open(log_path, 'a', buffering=1)
+        # log init settings
+        Log.write(f'{" ".join(sys.argv)}\nSearch directory: {args.sd}\n{SEPARATOR}')
 
     @staticmethod
     def write(message):
@@ -438,9 +448,9 @@ class FlatResDir:
 
 
 class ResDirEntry:
-    def __init__(self, struct_offset, struct_size, is_data_next, name_indent, name_offset, entry_bname, entry_id, next_entry_indent, next_entry_offset, next_entry):
+    def __init__(self, struct_offset, is_data_next, name_indent, name_offset, entry_bname, entry_id, next_entry_indent, next_entry_offset, next_entry):
         self.struct_offset = struct_offset
-        self.struct_size = struct_size
+        self.struct_size = 8
         self.is_data_next = is_data_next
         self.name_indent = name_indent
         self.name_offset = name_offset
@@ -478,9 +488,9 @@ class FlatResDirEntry:
 
 
 class ResDataEntry:
-    def __init__(self, struct_offset, struct_size, data_va, data_offset, data_size, code_page, reserved, data_bytes):
+    def __init__(self, struct_offset, data_va, data_offset, data_size, code_page, reserved, data_bytes):
         self.struct_offset = struct_offset
-        self.struct_size = struct_size
+        self.struct_size = 16
         self.data_va = data_va
         self.data_offset = data_offset
         self.data_size = data_size
@@ -554,10 +564,14 @@ class MimicPart:
 
 
 class MimicPE:
-    def __init__(self, path_to_file, sections, rich, stamp, sign, dbgs, res, section_alignment=None, file_alignment=None):
+    def __init__(self, path_to_file, e_lfanew, is_64, data, size, sections, rich, stamp, sign, dbgs, res, section_alignment=None, file_alignment=None):
         self.path = path_to_file
         self.name = os.path.splitext(os.path.split(path_to_file)[1])[0]
         self.ext = os.path.splitext(os.path.split(path_to_file)[1])[1]
+        self.e_lfanew = e_lfanew
+        self.is_64 = is_64
+        self.data = data
+        self.size = size
         self.sections = sections
         self.rich = rich
         self.stamp = stamp
@@ -567,14 +581,14 @@ class MimicPE:
         self.section_alignment = section_alignment
         self.file_alignment = file_alignment
 
-    def contains_data(self):
-        if self.rich or self.stamp or self.sign:
-            return True
-        else:
-            return False
+    # def contains_data(self):
+    #     if self.rich or self.stamp or self.sign:
+    #         return True
+    #     else:
+    #         return False
 
-    def count(self):
-        return int(self.rich is not None) + int(self.stamp is not None) + int(self.sign is not None) + int(self.dbgs is not None)
+    # def count(self):
+    #     return int(self.rich is not None) + int(self.stamp is not None) + int(self.sign is not None) + int(self.dbgs is not None)
 
 
 class RichParsed:
@@ -733,7 +747,6 @@ def __get_resource_entries(data, entry_offset, start_offset, offset_va_delta, eo
         data_entry_offset = data_entry_va - offset_va_delta
         data_entry_size = int.from_bytes(next_entry_struct[4:8], 'little')
         next_entry = ResDataEntry(struct_offset=next_entry_offset,
-                                  struct_size=16,
                                   data_va=data_entry_va,
                                   data_offset=data_entry_offset,
                                   data_size=data_entry_size,
@@ -757,7 +770,6 @@ def __get_resource_entries(data, entry_offset, start_offset, offset_va_delta, eo
             i += 1
 
     return ResDirEntry(struct_offset=entry_offset,
-                       struct_size=8,
                        is_data_next=is_data_next,
                        name_indent=entry_name_indent,
                        name_offset=entry_name_offset,
@@ -911,8 +923,9 @@ def update_checksum_py(data):
 
 
 # update PE checksum
-def update_checksum(data):
+def update_checksum(data, parts):
     global USE_CHECKSUM_DLL, DLL_CHECKSUM_FUNC, CHECKSUM_32_DLL_NAME, CHECKSUM_64_DLL_NAME
+    parts['chs'] = 'Checksum updated.'
     if USE_CHECKSUM_DLL is None:
         module_path = os.path.dirname(os.path.abspath(__file__))
         if sys.maxsize > 2**32:  # python interpreter is 64 bit
@@ -965,53 +978,68 @@ def get_sections(data, e_lfanew, eof, checking_original=False):
 
 
 # change source PE section names to donor PE section names
-def change_section_names(data, sections_orig, sections_donor):
+def change_section_names(sample_data, sections_orig, sections_donor, parts):
     osc = len(sections_orig)    # original section counter
     dsc = len(sections_donor)   # donor section counter
+    rsrc_name = b'\x2e\x72\x73\x72\x63\x00\x00\x00'  # '.rsrc000' little
     changes = []
     chg_count = 0
 
     o = 0
     d = 0
-    upd_data = bytearray(data)
     while o < osc:
         if o == osc or d == dsc:
             break
-        if sections_orig[o].bname == b'\x2e\x72\x73\x72\x63\x00\x00\x00':  # '.rsrc000'
+        if sections_orig[o].bname == rsrc_name:  # do not touch rsrc section
             o += 1
             continue
-        if sections_donor[d].bname == b'\x2e\x72\x73\x72\x63\x00\x00\x00':  # '.rsrc000'
+        if sections_donor[d].bname == rsrc_name:
             d += 1
             continue
         if sections_orig[o].bname != sections_donor[d].bname:
-            upd_data = upd_data[:sections_orig[o].struct_offset] + sections_donor[d].bname + upd_data[sections_orig[o].struct_offset + 8:]
+            sample_data = sample_data[:sections_orig[o].struct_offset] + sections_donor[d].bname + sample_data[sections_orig[o].struct_offset + 8:]
             donor_sec_str_name = sections_donor[d].bname.decode('UTF-8').rstrip('\x00')
             orig_sec_str_name = sections_orig[o].bname.decode('UTF-8').rstrip('\x00')
             changes.append(f'{orig_sec_str_name} -> {donor_sec_str_name}')
             chg_count += 1
         o += 1
         d += 1
-    Log.write("\n".join(changes))
-    return tuple([upd_data, f'names_{chg_count}of{osc}'])
+    sep = '\n\t'
+    parts[f'names_{chg_count}of{osc}'] = f'Section names changed:\n' \
+                                         f'\t{sep.join(changes)}'
+    return sample_data
+
+
+# search for free space to place the rich
+def get_space_for_rich(data, e_lfanew):
+    global RICH_START_OFFSET
+    size = 0
+    i = RICH_START_OFFSET
+    while i < e_lfanew:
+        if data[i] == 0:
+            size += 1
+        else:
+            break
+        i += 1
+    return size - (size % 8)
 
 
 # get PE rich
 def get_rich(data, e_lfanew, checking_original=False):
-    RICH = b'\x52\x69\x63\x68'  # 1751345490 == b'\x52\x69\x63\x68' == b'Rich'
-    DANS = 1147235923  # 1147235923 == b'\x44\x61\x6e\x53' == b'DanS'
+    global RICH_MARK, DANS_MARK_B, RICH_START_OFFSET, RICH_MIN_SIZE
     rich_tail_offset = 0
     rich_head_offset = 0
     rich_xor_key = 0
     j = e_lfanew - 4
 
-    while j >= 0x80:
+    while j >= RICH_START_OFFSET:
         if rich_head_offset == 0:
-            if data[j:j + 4] == RICH:
+            if data[j:j + 4] == RICH_MARK:
                 rich_head_offset = j + 8
                 rich_xor_key = int.from_bytes(data[j + 4:rich_head_offset], 'big')
                 j -= 3
         else:
-            if int.from_bytes(data[j:j + 4], 'big') ^ rich_xor_key == DANS:
+            if int.from_bytes(data[j:j + 4], 'big') ^ rich_xor_key == DANS_MARK_B:
                 rich_tail_offset = j
                 break
         j -= 1
@@ -1027,6 +1055,13 @@ def get_rich(data, e_lfanew, checking_original=False):
             message = 'Original file does not contain "Rich" header.'
             print(f'{Back.CYAN}{message}{Back.RESET}')
             Log.write(message)
+            rich_size = get_space_for_rich(data, e_lfanew)
+            if rich_size >= RICH_MIN_SIZE:
+                message = 'Free space found to place the "Rich" header.'
+                print(f'{Back.GREEN}{message}{Back.RESET}')
+                Log.write(message)
+                return MimicPart(struct_offset=RICH_START_OFFSET,
+                                 struct_size=rich_size)
         return None
 
 
@@ -1349,7 +1384,7 @@ def check_args(args):
             print(e)
             exit_program(f'Can not create "-out" directory: {args.out_file}')
     # check "-sd" dir
-    if not os.path.exists(args.sd) or not os.path.isdir(args.sd):
+    if not os.path.exists(args.sd):
         exit_program(f'Can not access the "-sd" directory: {args.sd}')
     # set limit
     if args.limit < 1:
@@ -1396,12 +1431,13 @@ def check_args(args):
 
 # set search options
 def set_options(args):
-    if (args.rich and args.timePE and args.sign and args.vi and args.dbg and args.res) \
-            or (not args.rich and not args.timePE and not args.sign and not args.vi and not args.dbg and not args.res
-                and not args.no_rich and not args.no_timePE and not args.no_sign and not args.no_vi and not args.no_dbg and not args.no_res):
+    # no options selected == all options selected
+    if all([args.rich, args.timePE, args.sign, args.vi, args.dbg, args.res, args.names]) \
+            or (not any([args.rich, args.timePE, args.sign, args.vi, args.dbg, args.res, args.names,
+                         args.no_rich, args.no_timePE, args.no_sign, args.no_vi, args.no_dbg, args.no_res, args.no_names])):
         return
-
-    if args.rich or args.timePE or args.sign or args.vi or args.dbg or args.res:
+    # enable specified options
+    if any([args.rich, args.timePE, args.sign, args.vi, args.dbg, args.res]):
         Options.disable_all()
         if args.rich:
             Options.search_rich = True
@@ -1415,7 +1451,10 @@ def set_options(args):
             Options.search_dbg = True
         if args.res:
             Options.search_res = True
-    else:
+        if args.names:
+            Options.change_names = True
+    else:  # disable specified options
+        Options.enable_all()
         if args.no_rich:
             Options.search_rich = False
         if args.no_timePE:
@@ -1428,6 +1467,8 @@ def set_options(args):
             Options.search_dbg = False
         if args.no_res:
             Options.search_res = False
+        if args.no_names:
+            Options.change_names = False
     return
 
 
@@ -1445,8 +1486,17 @@ def check_64(data, e_lfanew, checking_original=False):
 
 
 # check original PE parts
-def check_original(path_to_file, data, e_lfanew, is_64, orig_eof):
-    orig_sections = get_sections(data, e_lfanew, orig_eof, checking_original=True)
+def check_original(path_to_file):
+    global SEPARATOR
+    with open(path_to_file, 'rb') as file:
+        data = bytearray(file.read())
+    pe_size = len(data)
+    e_lfanew = int.from_bytes(data[0x3c:0x40], 'little')
+    if e_lfanew == 0 or e_lfanew >= pe_size:
+        exit_program(f'Original file contains invalid e_lfanew value: {hex(e_lfanew)}.')
+    is_64 = check_64(data, e_lfanew, checking_original=True)
+
+    orig_sections = get_sections(data, e_lfanew, pe_size, checking_original=True)
     sec_alignment = int.from_bytes(data[e_lfanew + 56:e_lfanew + 60], 'little')  # SectionAlignment offset = e_lfanew + 4 + 20 + 32
     fl_alignment = int.from_bytes(data[e_lfanew + 60:e_lfanew + 64], 'little')   # FileAlignment offset = e_lfanew + 4 + 20 + 36
     if fl_alignment % 2 > 0 or fl_alignment > 64000:
@@ -1472,14 +1522,14 @@ def check_original(path_to_file, data, e_lfanew, is_64, orig_eof):
         orig_rich = None
     # check original debug info
     if Options.search_dbg:
-        orig_dbgs = get_dbg(data, e_lfanew, is_64, orig_sections, orig_eof, checking_original=True)
+        orig_dbgs = get_dbg(data, e_lfanew, is_64, orig_sections, pe_size, checking_original=True)
         if orig_dbgs is None:
             Options.search_dbg = False
     else:
         orig_dbgs = None
     # check original resources
     if Options.search_res or Options.search_vi:
-        orig_res = get_resources(data, e_lfanew, is_64, orig_sections, orig_eof, checking_original=True)
+        orig_res = get_resources(data, e_lfanew, is_64, orig_sections, pe_size, checking_original=True)
         if orig_res is None:
             if Options.search_res:
                 Options.search_res = False
@@ -1496,7 +1546,7 @@ def check_original(path_to_file, data, e_lfanew, is_64, orig_eof):
     else:
         orig_res = None
     # check if there are search options left
-    if Options.get_count() == 0:
+    if Options.get_search_count() == 0:
         exit_program('Nothing to search.', 0)
     # check original time stamp
     if Options.search_stamp:
@@ -1505,11 +1555,16 @@ def check_original(path_to_file, data, e_lfanew, is_64, orig_eof):
         orig_stamp = None
     # check original authenticode sign
     if Options.search_sign:
-        orig_sign = get_sign(data, e_lfanew, is_64, orig_eof, checking_original=True)
+        orig_sign = get_sign(data, e_lfanew, is_64, pe_size, checking_original=True)
     else:
         orig_sign = None
+    Log.write(SEPARATOR)
     # collect received data
     return MimicPE(path_to_file=path_to_file,
+                   e_lfanew=e_lfanew,
+                   is_64=is_64,
+                   data=data,
+                   size=pe_size,
                    sections=orig_sections,
                    rich=orig_rich,
                    stamp=orig_stamp,
@@ -1520,302 +1575,350 @@ def check_original(path_to_file, data, e_lfanew, is_64, orig_eof):
                    file_alignment=fl_alignment)
 
 
-# check files in search dir
-def search_donors(pe, base_depth, arguments):
-    global COUNTER
-    for dirpath, dirnames, filenames in os.walk(arguments.sd):
-        if arguments.limit == 0:
-            break
-        cur_level = len(dirpath.split("\\"))
-        if cur_level > base_depth + arguments.depth:
-            continue
-        for filename in [f for f in filenames if f.endswith(arguments.ext)]:
-            if arguments.limit == 0:
-                break
+def get_donor(pe, donor_path, args):
+    try:
+        with open(donor_path, 'rb') as donor_file:
+            data = bytearray(donor_file.read())
+    except (FileNotFoundError, PermissionError, OSError):
+        return None
+    size = len(data)
+    e_lfanew = int.from_bytes(data[0x3c:0x40], 'little')
+    if e_lfanew == 0 or e_lfanew >= size:
+        return None
+    is_64 = check_64(data, e_lfanew)
+    if is_64 is None:  # is_64 == None means donor is not valid PE, so go next
+        return None
+    donor_sections = get_sections(data, e_lfanew, size)
+    if donor_sections is None:
+        return None
 
+    score = 0
+    donor_rich = None
+    if Options.search_rich:
+        donor_rich = get_rich(data, e_lfanew)
+        if pe.rich.fits(donor_rich):  # check if it fits as there are size restrictions
+            score += 1
+        else:
             donor_rich = None
-            donor_sign = None
-            donor_stamp = None
-            donor_dbgs = None
-            donor_res = None
-            donor_path = os.path.join(dirpath, filename)
-            try:
-                with open(donor_path, 'rb') as donor_file:
-                    donor_data = bytearray(donor_file.read())
-            except (FileNotFoundError, PermissionError, OSError):
+    donor_sign = None
+    if Options.search_sign:
+        donor_sign = get_sign(data, e_lfanew, is_64, size)
+        if donor_sign:
+            score += 1
+    donor_stamp = None
+    if Options.search_stamp:
+        donor_stamp = get_stamp(data, e_lfanew)
+        if donor_stamp:
+            score += 1
+    donor_dbgs = None
+    if Options.search_dbg:
+        donor_dbgs = get_dbg(data, e_lfanew, is_64, donor_sections, size)
+        if donor_dbgs:
+            score += 1
+    donor_res = None
+    if Options.search_res or Options.search_vi:
+        donor_res = get_resources(data, e_lfanew, is_64, donor_sections, size)
+        if Options.search_res and donor_res:
+            score += 1
+        if Options.search_vi and donor_res and donor_res.vi:
+            score += 1
+
+    if score > 0 and score >= Options.get_search_count() - int(args.approx):
+        return MimicPE(path_to_file=donor_path,
+                       e_lfanew=e_lfanew,
+                       is_64=is_64,
+                       data=data,
+                       size=size,
+                       sections=donor_sections,
+                       rich=donor_rich,
+                       stamp=donor_stamp,
+                       sign=donor_sign,
+                       dbgs=donor_dbgs,
+                       res=donor_res)
+    else:
+        return None
+
+
+def set_rich(sample_data, pe, donor, args, parts):
+    donor_rich_data = donor.data[donor.rich.struct_offset:donor.rich.struct_offset + donor.rich.struct_size]
+    if not args.no_rich_fix:
+        rich_parsed = RichParsed(donor_rich_data)
+        sample_data = fix_rich_linker(sample_data, rich_parsed, pe.e_lfanew)
+        fix_rich_imports(sample_data, rich_parsed, pe.sections, pe.e_lfanew)
+        fix_rich_checksum(sample_data, donor.rich.struct_offset, rich_parsed, pe.e_lfanew)
+    sample_data = sample_data[:pe.rich.struct_offset] + \
+        donor_rich_data + b'\x00' * (pe.rich.struct_size - donor.rich.struct_size) + \
+        sample_data[pe.rich.struct_offset + pe.rich.struct_size:]
+    parts['rich'] = f'Rich changed -> prev size: {pe.rich.struct_size} bytes -> new size: {donor.rich.struct_size} bytes.'
+    return sample_data
+
+
+def set_stammp(sample_data, pe, donor, parts):
+    parts['timePE'] = 'PE time stamp changed.'
+    return sample_data[:pe.stamp.struct_offset] + \
+        donor.data[donor.stamp.struct_offset:donor.stamp.struct_offset + donor.stamp.struct_size] + \
+        sample_data[pe.stamp.struct_offset + pe.stamp.struct_size:]
+
+
+def set_dbg(sample_data, pe, donor, parts):
+    pe.dbgs.sort(key=operator.attrgetter('data_size'))
+    donor.dbgs.sort(key=operator.attrgetter('data_size'), reverse=True)
+    changed = 0
+
+    for odbg in pe.dbgs:
+        ddc = 0
+        while ddc < len(donor.dbgs):
+            if odbg.fits(donor.dbgs[ddc]):
+                changed += 1
+                ddbg = donor.dbgs.pop(ddc)
+                if odbg.data_size != ddbg.data_size:
+                    dbg_entry = donor.data[ddbg.struct_offset:ddbg.struct_offset + 20] + sample_data[odbg.struct_offset + 20:odbg.struct_offset + 28]
+                    sample_data = sample_data[:odbg.struct_offset] + dbg_entry + sample_data[odbg.struct_offset + odbg.struct_size:]
+                sample_data = sample_data[:odbg.data_offset] + \
+                    donor.data[ddbg.data_offset:ddbg.data_offset + ddbg.data_size] + \
+                    b'\x00' * (odbg.data_size - ddbg.data_size) + \
+                    sample_data[odbg.data_offset + odbg.data_size:]
+                break
+            else:
+                ddc += 1
+    parts[f'dbg_{changed}of{len(pe.dbgs)}'] = f'Debug info -> total count: {len(pe.dbgs)} -> changed count: {changed}.'
+    return sample_data
+
+
+# returns tuple(sample_data, end_of_rsrc_data)
+def set_resources(sample_data, pe, donor, parts):
+    merged_res = merge_resources(pe.res, donor.res, Options.search_vi, Options.search_res)
+    flat_resources = get_flat_resources(merged_res)
+
+    rsrc_name_entries = bytearray()
+    for ne in flat_resources.name_entries:
+        pad = flat_resources.last_indent % 2
+        if pad > 0:
+            rsrc_name_entries += b'\x00'
+            flat_resources.last_indent += 1
+        rsrc_name_entries += ne[1]
+        ne[0].name_id = flat_resources.last_indent + 2147483648  # 2147483648 is 80000000 to set high bit
+        flat_resources.last_indent += len(ne[1])
+
+    rsrc_section = None
+    next_sections = []
+    for pe_section in pe.sections:
+        if rsrc_section is not None:
+            next_sections.append(pe_section)
+        else:
+            if pe_section.raddr <= pe.res.struct_offset < pe_section.raddr + pe_section.rsize:
+                rsrc_section = pe_section
+    rsrc_data_entries = bytearray()
+    last_va = rsrc_section.vaddr + flat_resources.last_indent
+    for de in flat_resources.data_entries:
+        pad = 4 - last_va % 4  # dword alignment
+        if pad < 4:
+            rsrc_data_entries += b'\x00' * pad
+            last_va += pad
+        rsrc_data_entries += de[1]
+        de[0].data_va = last_va
+        last_va += len(de[1])
+
+    rsrc_struct_entries = bytearray()
+    for key in flat_resources.struct_entries:
+        for se in flat_resources.struct_entries[key]:
+            rsrc_struct_entries += se.to_bytes()
+
+    rsrc_bytes = rsrc_struct_entries + rsrc_name_entries + rsrc_data_entries
+    rsrc_rsz = len(rsrc_bytes)
+    pad = rsrc_rsz % pe.file_alignment
+    if pad > 0:
+        rsrc_bytes += (pe.file_alignment - pad) * b'\x00'
+        rsrc_rsz = len(rsrc_bytes)
+    sample_end_of_data = rsrc_section.raddr + rsrc_rsz
+    if rsrc_rsz != rsrc_section.rsize:
+
+        # change SizeOfRawData in .rsrc section struct
+        sample_data = sample_data[:rsrc_section.struct_offset + 16] + rsrc_rsz.to_bytes(4, 'little') + sample_data[rsrc_section.struct_offset + 20:]
+
+        # SizeOfInitializedData offset = e_lfanew + 4 + 20 + 8
+        size_of_init_data = int.from_bytes(sample_data[pe.e_lfanew + 32:pe.e_lfanew + 36], 'little')
+        if rsrc_rsz > rsrc_section.rsize:
+            size_of_init_data += rsrc_rsz - rsrc_section.rsize
+        else:
+            size_of_init_data += rsrc_section.rsize - rsrc_rsz
+
+        # change SizeOfInitializedData
+        sample_data = sample_data[:pe.e_lfanew + 32] + size_of_init_data.to_bytes(4, 'little') + sample_data[pe.e_lfanew + 36:]
+
+        # change VirtualSize in .rsrc section struct
+        rsrc_vsz = rsrc_section.vsize
+        if rsrc_rsz > rsrc_vsz:
+            rsrc_vsz = rsrc_rsz
+            sample_data = sample_data[:rsrc_section.struct_offset + 8] + rsrc_vsz.to_bytes(4, 'little') + sample_data[rsrc_section.struct_offset + 12:]
+        size_of_image = rsrc_section.vaddr + rsrc_vsz
+
+        # calculate new addresses for next sections
+        if len(next_sections) > 0:
+            rpointer = rsrc_section.raddr + rsrc_rsz
+            vpointer = rsrc_section.vaddr + rsrc_vsz
+            for ns in next_sections:
+                pad = vpointer % pe.section_alignment
+                if pad > 0:
+                    vpointer += pe.section_alignment - pad
+
+                # change VirtualAddress of next section
+                sample_data = sample_data[:ns.struct_offset + 12] + vpointer.to_bytes(4, 'little') + sample_data[ns.struct_offset + 16:]
+
+                # change PointerToRawData of next section
+                sample_data = sample_data[:ns.struct_offset + 20] + rpointer.to_bytes(4, 'little') + sample_data[ns.struct_offset + 24:]
+                rpointer += ns.rsize
+                vpointer += ns.vsize
+
+            # SizeOfImage offset = e_lfanew + 4 + 20 + 56
+            size_of_image = vpointer
+            sample_end_of_data = rpointer
+
+        # change SizeOfImage
+        sample_data = sample_data[:pe.e_lfanew + 80] + size_of_image.to_bytes(4, 'little') + sample_data[pe.e_lfanew + 84:]
+
+    if Options.search_res:
+        parts['res'] = f'Resources -> prev size: {rsrc_section.rsize} bytes -> new size: {rsrc_rsz} bytes.'
+    if Options.search_vi and donor.res.vi is not None:
+        if pe.res.vi is None:
+            parts['vi'] = f'VersionInfo added.'
+        else:
+            parts['vi'] = f'VersionInfo changed'
+    return tuple([sample_data[:rsrc_section.raddr] + rsrc_bytes + sample_data[rsrc_section.raddr + rsrc_section.rsize:], sample_end_of_data])
+
+
+def set_sign(sample_data, pe, donor, parts, sample_end_of_data):
+    if sample_end_of_data < pe.sign.data_offset:
+        sample_end_of_data = pe.sign.data_offset
+    if pe.sign.data_size != donor.sign.data_size:  # change size of data in struct if needed
+        dd_entry = sample_end_of_data.to_bytes(4, 'little') + donor.sign.data_size.to_bytes(4, 'little')
+        sample_data = sample_data[:pe.sign.hdr_offset] + dd_entry + sample_data[pe.sign.hdr_offset + pe.sign.hdr_size:]
+    if pe.sign.data_size == 0:
+        parts['sign'] = f'Sign added -> size: {donor.sign.data_size} bytes.'
+    else:
+        parts['sign'] = f'Sign changed -> prev size: {pe.sign.data_size} bytes -> new size: {donor.sign.data_size} bytes.'
+    return sample_data[:sample_end_of_data] + \
+        donor.data[donor.sign.data_offset:donor.sign.data_offset + donor.sign.data_size] + \
+        sample_data[sample_end_of_data + pe.sign.data_size:]
+
+
+def get_sample_data(pe, donor, args, parts):
+    sample_data = bytearray(pe.data)
+    # transplant rich from donor
+    if Options.search_rich and donor.rich:
+        sample_data = set_rich(sample_data, pe, donor, args, parts)
+    # transplant time stamp from donor
+    if Options.search_stamp and donor.stamp:
+        sample_data = set_stammp(sample_data, pe, donor, parts)
+    # transplant debug info from donor
+    if Options.search_dbg and donor.dbgs:
+        sample_data = set_dbg(sample_data, pe, donor, parts)
+    sample_end_of_data = 0
+    # transplant resources from donor
+    if (Options.search_res or Options.search_vi) and donor.res:
+        resource_result = set_resources(sample_data, pe, donor, parts)
+        sample_data = resource_result[0]
+        sample_end_of_data = resource_result[1]
+    # transplant authenticode sign from donor
+    if Options.search_sign and donor.sign:
+        sample_data = set_sign(sample_data, pe, donor, parts, sample_end_of_data)
+    # change original section names
+    if Options.change_names:
+        sample_data = change_section_names(sample_data, pe.sections, donor.sections, parts)
+    # update checksum
+    if args.upd_checksum:
+        sample_data = update_checksum(sample_data, parts)
+    return sample_data
+
+
+def save_sample(sample_data, pe, donor, args, parts):
+    global COUNTER, SEPARATOR
+    COUNTER += 1
+    args.limit -= 1
+    sample_name = f'{str(COUNTER)}_{pe.name}-{donor.name}_{"-".join(parts.keys())}{pe.ext}'
+    Log.write(sample_name)
+    sample_path = os.path.join(args.out_dir, sample_name)
+    parts['message'] = f'Donor : {donor.path}\nSample: {sample_path}'
+    Log.write(f'\n{"-" * 22}\n'.join([parts[k] for k in parts.keys()]))
+    with open(sample_path, 'wb') as f:
+        f.write(sample_data)
+    print(sample_name)
+    if args.with_donor:
+        donor_name = f'{str(COUNTER)}_{donor.name}{donor.ext}'
+        donor_path = os.path.join(args.out_dir, donor_name)
+        with open(donor_path, 'wb') as f:
+            f.write(donor.data)
+    Log.write(SEPARATOR)
+
+
+def parts_transplant(pe, donor, args):
+    parts = {}
+    sample_data = get_sample_data(pe, donor, args, parts)
+    save_sample(sample_data, pe, donor, args, parts)
+
+
+# check files in search dir
+def search_donors(pe, args):
+    if os.path.isfile(args.sd):
+        donor = get_donor(pe, args.sd, args)
+        if donor is not None:
+            parts_transplant(pe, donor, args)
+    else:
+        # check initial nesting level of directory
+        base_depth = len(args.sd.split("\\"))
+        for dirpath, dirnames, filenames in os.walk(args.sd):
+            if args.limit == 0:
+                msg = 'Limit reached.'
+                print(f'{Back.CYAN}{msg}{Back.RESET}')
+                Log.write(msg)
+                break
+            cur_level = len(dirpath.split("\\"))
+            if cur_level > base_depth + args.depth:
                 continue
-            donor_eof = len(donor_data)
-            donor_e_lfanew = int.from_bytes(donor_data[0x3c:0x40], 'little')
-            if donor_e_lfanew == 0 or donor_e_lfanew >= donor_eof:
-                continue
-            donor_is_64 = check_64(donor_data, donor_e_lfanew)
-            if donor_is_64 is None:  # donor_is_64 == None means donor is not valid PE, so go next
-                continue
-
-            score = 0
-            donor_sections = get_sections(donor_data, donor_e_lfanew, donor_eof)
-            if donor_sections is None:
-                continue
-
-            if Options.search_rich:
-                donor_rich = get_rich(donor_data, donor_e_lfanew)
-                if pe.rich.fits(donor_rich):  # check if it fits as there are size restrictions
-                    score += 1
-                else:
-                    donor_rich = None
-            if Options.search_sign:
-                donor_sign = get_sign(donor_data, donor_e_lfanew, donor_is_64, donor_eof)
-                if donor_sign:
-                    score += 1
-            if Options.search_stamp:
-                donor_stamp = get_stamp(donor_data, donor_e_lfanew)
-                if donor_stamp:
-                    score += 1
-            if Options.search_dbg:
-                donor_dbgs = get_dbg(donor_data, donor_e_lfanew, donor_is_64, donor_sections, donor_eof)
-                if donor_dbgs:
-                    score += 1
-            if Options.search_res or Options.search_vi:
-                donor_res = get_resources(donor_data, donor_e_lfanew, donor_is_64, donor_sections, donor_eof)
-                if Options.search_res and donor_res:
-                    score += 1
-                if Options.search_vi and donor_res and donor_res.vi:
-                    score += 1
-
-            if score > 0 and score >= Options.get_count() - int(arguments.approx):
-                donor = MimicPE(path_to_file=donor_path,
-                                sections=donor_sections,
-                                rich=donor_rich,
-                                stamp=donor_stamp,
-                                sign=donor_sign,
-                                dbgs=donor_dbgs,
-                                res=donor_res)
-                new_data = bytearray(orig_data)
-                parts = []
-
-                if Options.search_rich and donor.rich:
-                    parts.append('rich')
-                    donor_rich_data = donor_data[donor.rich.struct_offset:donor.rich.struct_offset + donor.rich.struct_size]
-                    if not arguments.no_rich_fix:
-                        rich_parsed = RichParsed(donor_rich_data)
-                        new_data = fix_rich_linker(new_data, rich_parsed, orig_e_lfanew)
-                        fix_rich_imports(new_data, rich_parsed, pe.sections, orig_e_lfanew)
-                        fix_rich_checksum(new_data, donor.rich.struct_offset, rich_parsed, orig_e_lfanew)
-                    new_data = new_data[:pe.rich.struct_offset] + \
-                        donor_rich_data + b'\x00' * (pe.rich.struct_size - donor.rich.struct_size) + \
-                        new_data[pe.rich.struct_offset + pe.rich.struct_size:]
-
-                if Options.search_stamp and donor.stamp:
-                    parts.append('timePE')
-                    new_data = new_data[:pe.stamp.struct_offset] + \
-                        donor_data[donor.stamp.struct_offset:donor.stamp.struct_offset + donor.stamp.struct_size] + \
-                        new_data[pe.stamp.struct_offset + pe.stamp.struct_size:]
-
-                if Options.search_dbg and donor.dbgs:
-                    pe.dbgs.sort(key=operator.attrgetter('data_size'))
-                    donor.dbgs.sort(key=operator.attrgetter('data_size'), reverse=True)
-                    changed = 0
-
-                    for odbg in pe.dbgs:
-                        dpc = 0
-                        while dpc < len(donor.dbgs):
-                            if odbg.fits(donor.dbgs[dpc]):
-                                changed += 1
-                                ddbg = donor.dbgs.pop(dpc)
-                                if odbg.data_size != ddbg.data_size:
-                                    dbg_entry = donor_data[ddbg.struct_offset:ddbg.struct_offset + 20] + new_data[odbg.struct_offset + 20:odbg.struct_offset + 28]
-                                    new_data = new_data[:odbg.struct_offset] + dbg_entry + new_data[odbg.struct_offset + odbg.struct_size:]
-                                new_data = new_data[:odbg.data_offset] + \
-                                    donor_data[ddbg.data_offset:ddbg.data_offset + ddbg.data_size] + \
-                                    b'\x00' * (odbg.data_size - ddbg.data_size) + \
-                                    new_data[odbg.data_offset + odbg.data_size:]
-                                break
-                            else:
-                                dpc += 1
-                    parts.append(f'dbg_{changed}of{len(pe.dbgs)}')
-
-                sample_end_of_data = 0
-                if (Options.search_res or Options.search_vi) and donor.res:
-                    if Options.search_res:
-                        parts.append('res')
-                    if Options.search_vi:
-                        parts.append('vi')
-                    merged_res = merge_resources(pe.res, donor.res, Options.search_vi, Options.search_res)
-                    flat_resources = get_flat_resources(merged_res)
-
-                    rsrc_name_entries = bytearray()
-                    for ne in flat_resources.name_entries:
-                        pad = flat_resources.last_indent % 2
-                        if pad > 0:
-                            rsrc_name_entries += b'\x00'
-                            flat_resources.last_indent += 1
-                        rsrc_name_entries += ne[1]
-                        ne[0].name_id = flat_resources.last_indent + 2147483648  # 2147483648 is 80000000 to set high bit
-                        flat_resources.last_indent += len(ne[1])
-
-                    rsrc_section = None
-                    next_sections = []
-                    for pe_section in pe.sections:
-                        if rsrc_section is not None:
-                            next_sections.append(pe_section)
-                        else:
-                            if pe_section.raddr <= pe.res.struct_offset < pe_section.raddr + pe_section.rsize:
-                                rsrc_section = pe_section
-                    rsrc_data_entries = bytearray()
-                    last_va = rsrc_section.vaddr + flat_resources.last_indent
-                    for de in flat_resources.data_entries:
-                        pad = 4 - last_va % 4  # dword alignment
-                        if pad < 4:
-                            rsrc_data_entries += b'\x00' * pad
-                            last_va += pad
-                        rsrc_data_entries += de[1]
-                        de[0].data_va = last_va
-                        last_va += len(de[1])
-
-                    rsrc_struct_entries = bytearray()
-                    for key in flat_resources.struct_entries:
-                        for se in flat_resources.struct_entries[key]:
-                            rsrc_struct_entries += se.to_bytes()
-
-                    rsrc_bytes = rsrc_struct_entries + rsrc_name_entries + rsrc_data_entries
-                    rsrc_rsz = len(rsrc_bytes)
-                    pad = rsrc_rsz % pe.file_alignment
-                    if pad > 0:
-                        rsrc_bytes += (pe.file_alignment - pad) * b'\x00'
-                        rsrc_rsz = len(rsrc_bytes)
-                    sample_end_of_data = rsrc_section.raddr + rsrc_rsz
-                    if rsrc_rsz != rsrc_section.rsize:
-
-                        # change SizeOfRawData in .rsrc section struct
-                        new_data = new_data[:rsrc_section.struct_offset + 16] + rsrc_rsz.to_bytes(4, 'little') + new_data[rsrc_section.struct_offset + 20:]
-
-                        # SizeOfInitializedData offset = e_lfanew + 4 + 20 + 8
-                        size_of_init_data = int.from_bytes(new_data[orig_e_lfanew + 32:orig_e_lfanew + 36], 'little')
-                        if rsrc_rsz > rsrc_section.rsize:
-                            size_of_init_data += rsrc_rsz - rsrc_section.rsize
-                        else:
-                            size_of_init_data += rsrc_section.rsize - rsrc_rsz
-
-                        # change SizeOfInitializedData
-                        new_data = new_data[:orig_e_lfanew + 32] + size_of_init_data.to_bytes(4, 'little') + new_data[orig_e_lfanew + 36:]
-
-                        # change VirtualSize in .rsrc section struct
-                        rsrc_vsz = rsrc_section.vsize
-                        if rsrc_rsz > rsrc_vsz:
-                            rsrc_vsz = rsrc_rsz
-                            new_data = new_data[:rsrc_section.struct_offset + 8] + rsrc_vsz.to_bytes(4, 'little') + new_data[rsrc_section.struct_offset + 12:]
-                        size_of_image = rsrc_section.vaddr + rsrc_vsz
-
-                        # calculate new addresses for next sections
-                        if len(next_sections) > 0:
-                            rpointer = rsrc_section.raddr + rsrc_rsz
-                            vpointer = rsrc_section.vaddr + rsrc_vsz
-                            for ns in next_sections:
-                                pad = vpointer % pe.section_alignment
-                                if pad > 0:
-                                    vpointer += pe.section_alignment - pad
-
-                                # change VirtualAddress of next section
-                                new_data = new_data[:ns.struct_offset + 12] + vpointer.to_bytes(4, 'little') + new_data[ns.struct_offset + 16:]
-
-                                # change PointerToRawData of next section
-                                new_data = new_data[:ns.struct_offset + 20] + rpointer.to_bytes(4, 'little') + new_data[ns.struct_offset + 24:]
-                                rpointer += ns.rsize
-                                vpointer += ns.vsize
-
-                            # SizeOfImage offset = e_lfanew + 4 + 20 + 56
-                            size_of_image = vpointer
-                            sample_end_of_data = rpointer
-
-                        # change SizeOfImage
-                        new_data = new_data[:orig_e_lfanew + 80] + size_of_image.to_bytes(4, 'little') + new_data[orig_e_lfanew + 84:]
-                    new_data = new_data[:rsrc_section.raddr] + rsrc_bytes + new_data[rsrc_section.raddr + rsrc_section.rsize:]
-
-                if Options.search_sign and donor.sign:
-                    parts.append('sign')
-                    if sample_end_of_data < pe.sign.data_offset:
-                        sample_end_of_data = pe.sign.data_offset
-                    if pe.sign.data_size != donor.sign.data_size:  # change size of data in struct if needed
-                        dd_entry = sample_end_of_data.to_bytes(4, 'little') + donor.sign.data_size.to_bytes(4, 'little')
-                        new_data = new_data[:pe.sign.hdr_offset] + dd_entry + new_data[pe.sign.hdr_offset + pe.sign.hdr_size:]
-                    new_data = new_data[:sample_end_of_data] + \
-                        donor_data[donor.sign.data_offset:donor.sign.data_offset + donor.sign.data_size] + \
-                        new_data[sample_end_of_data + pe.sign.data_size:]
-
-                if arguments.change_sec_names:
-                    names_result = change_section_names(new_data, pe.sections, donor.sections)
-                    new_data = names_result[0]
-                    parts.append(names_result[1])
-                if arguments.upd_checksum:
-                    new_data = update_checksum(new_data)
-
-                COUNTER += 1
-                arguments.limit -= 1
-                sample_name = f'{str(COUNTER)}_{pe.name}-{donor.name}_{"-".join(parts)}{pe.ext}'
-                sample_path = os.path.join(arguments.out_dir, sample_name)
-                message = f'Donor: {donor.path}\nSample: {sample_path}'
-                Log.write(message)
-                with open(sample_path, 'wb') as f:
-                    f.write(new_data)
-                print(sample_name)
-                if arguments.with_donor:
-                    donor_name = f'{str(COUNTER)}_{donor.name}{donor.ext}'
-                    donor_path = os.path.join(arguments.out_dir, donor_name)
-                    with open(donor_path, 'wb') as f:
-                        f.write(donor_data)
-                Log.write('----------------------------------------')
+            for filename in [f for f in filenames if f.endswith(args.ext)]:
+                if args.limit == 0:
+                    break
+                donor_path = os.path.join(dirpath, filename)
+                donor = get_donor(pe, donor_path, args)
+                if donor is None:
+                    continue
+                parts_transplant(pe, donor, args)
 
 
-parser = argparse.ArgumentParser(description='By default the script includes all attributes for search.')
-parser.add_argument('-in', dest='in_file', metavar='path/to/file', required=True, type=str, help='path to input file.')
-parser.add_argument('-out', dest='out_dir', metavar='path/to/dir', type=str, default=None, help='path to output dir. "-in" file path is default.')
-parser.add_argument('-sd', metavar='search/dir/path', type=str, default=r'C:\Windows', help='path to directory to search. "C:\\Windows" is default.')
-parser.add_argument('-d', dest='depth', metavar='depth', type=int, default=5, help='directory search depth. 5 is default.')
-parser.add_argument('-limit', metavar='int', type=int, default=0, help='required number of samples to create. all found variants is default. ')
-parser.add_argument('-approx', action='store_true', help='use of variants with incomplete match.')
-parser.add_argument('-rich', action='store_true', help='adds Rich Header to the search.')
-parser.add_argument('-no-rich-fix', dest='no_rich_fix', action='store_true', help='disable modifying Rich Header values.')
-parser.add_argument('-no-rich', dest='no_rich', action='store_true', help='removes Rich Header from the search.')
-parser.add_argument('-timePE', action='store_true', help='adds TimeDateStamp from File Header to the search.')
-parser.add_argument('-no-timePE', dest='no_timePE', action='store_true', help='removes TimeDateStamp from the search.')
-parser.add_argument('-sign', action='store_true', help='adds file sign to the search.')
-parser.add_argument('-no-sign', dest='no_sign', action='store_true', help='removes file sign from the search.')
-parser.add_argument('-vi', action='store_true', help='adds VersionInfo to the search.')
-parser.add_argument('-no-vi', dest='no_vi', action='store_true', help='removes VersionInfo from the search.')
-parser.add_argument('-res', action='store_true', help='adds resournces to the search.')
-parser.add_argument('-no-res', dest='no_res', action='store_true', help='removes resournces from the search.')
-parser.add_argument('-dbg', action='store_true', help='adds Debug Directory to the search.')
-parser.add_argument('-no-dbg', dest='no_dbg', action='store_true', help='removes Debug Directory from the search.')
-parser.add_argument('-ext', metavar='.extension', action='append', default=None,
-                    help='file extensions to process. multiple "-ext" supported. Default: ".exe" & ".dll".')
-parser.add_argument('-no-checksum', dest='upd_checksum', action='store_false', help='do not update the checksum.')
-parser.add_argument('-no-names', dest='change_sec_names', action='store_false', help='do not change section names.')
-parser.add_argument('-with-donor', dest='with_donor', action='store_true', help='creates copy of donor in the "-out" directory.')
-initargs = parser.parse_args()
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='By default the script includes all attributes for search.')
+    parser.add_argument('-in', dest='in_file', metavar='path/to/file', required=True, type=str, help='path to input file.')
+    parser.add_argument('-out', dest='out_dir', metavar='path/to/dir', type=str, default=None, help='path to output dir. "-in" file path is default.')
+    parser.add_argument('-sd', metavar='search/dir/path', type=str, default=r'C:\Windows', help='path to directory to search. "C:\\Windows" is default.')
+    parser.add_argument('-d', dest='depth', metavar='depth', type=int, default=5, help='directory search depth. 5 is default.')
+    parser.add_argument('-limit', metavar='int', type=int, default=0, help='required number of samples to create. all found variants is default. ')
+    parser.add_argument('-approx', action='store_true', help='use of variants with incomplete match.')
+    parser.add_argument('-rich', action='store_true', help='adds Rich Header to the search.')
+    parser.add_argument('-no-rich-fix', dest='no_rich_fix', action='store_true', help='disable modifying Rich Header values.')
+    parser.add_argument('-no-rich', dest='no_rich', action='store_true', help='removes Rich Header from the search.')
+    parser.add_argument('-timePE', action='store_true', help='adds TimeDateStamp from File Header to the search.')
+    parser.add_argument('-no-timePE', dest='no_timePE', action='store_true', help='removes TimeDateStamp from the search.')
+    parser.add_argument('-sign', action='store_true', help='adds file sign to the search.')
+    parser.add_argument('-no-sign', dest='no_sign', action='store_true', help='removes file sign from the search.')
+    parser.add_argument('-vi', action='store_true', help='adds VersionInfo to the search.')
+    parser.add_argument('-no-vi', dest='no_vi', action='store_true', help='removes VersionInfo from the search.')
+    parser.add_argument('-res', action='store_true', help='adds resournces to the search.')
+    parser.add_argument('-no-res', dest='no_res', action='store_true', help='removes resournces from the search.')
+    parser.add_argument('-dbg', action='store_true', help='adds Debug Directory to the search.')
+    parser.add_argument('-no-dbg', dest='no_dbg', action='store_true', help='removes Debug Directory from the search.')
+    parser.add_argument('-names', action='store_true', help='change section names as in the donor.')
+    parser.add_argument('-no-names', dest='no_names', action='store_true', help='do not change section names.')
+    parser.add_argument('-ext', metavar='.extension', action='append', default=None,
+                        help='file extensions to process. multiple "-ext" supported. Default: ".exe" & ".dll".')
+    parser.add_argument('-no-checksum', dest='upd_checksum', action='store_false', help='do not update the checksum.')
+    parser.add_argument('-with-donor', dest='with_donor', action='store_true', help='creates copy of donor in the "-out" directory.')
+    initargs = parser.parse_args()
 
-init()                                                                           # Colorama initialization
-check_args(initargs)                                                             # check for argument conflicts
-set_options(initargs)                                                            # set options for search
-Log.init(initargs.out_dir)                                                       # Log initialization
-Log.write(f'{" ".join(sys.argv)}\nSearch directory: {initargs.sd}\n{"-" * 30}')  # log init settings
+    init()                                                  # Colorama initialization
+    check_args(initargs)                                    # check for argument conflicts
+    set_options(initargs)                                   # set options for search
+    Log.init(initargs)                                      # Log initialization
+    original_pe = check_original(initargs.in_file)          # check original file
+    search_donors(original_pe, initargs)                    # search donors for original file
+    exit_program(f'Files savad in: {initargs.out_dir}', 0)  # cleanup and exit
 
-with open(initargs.in_file, 'rb') as file:
-    orig_data = bytearray(file.read())
-pe_eof = len(orig_data)
-orig_e_lfanew = int.from_bytes(orig_data[0x3c:0x40], 'little')
-if orig_e_lfanew == 0 or orig_e_lfanew >= pe_eof:
-    exit_program(f'Original file contains invalid e_lfanew value: {hex(orig_e_lfanew)}.')
-
-pe_is_64 = check_64(orig_data, orig_e_lfanew, checking_original=True)
-orig_pe = check_original(initargs.in_file, orig_data, orig_e_lfanew, pe_is_64, pe_eof)
-# check initial nesting level of directory
-base_level = len(initargs.sd.split("\\"))
-
-search_donors(orig_pe, base_level, initargs)
-
-if initargs.limit == 0:
-    msg = 'Limit reached.'
-    print(f'{Back.CYAN}{msg}{Back.RESET}')
-    Log.write(msg)
-
-exit_program(f'Files savad in: {initargs.out_dir}', 0)
