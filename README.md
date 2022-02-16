@@ -64,7 +64,7 @@ optional arguments:
   -no-dbg              removes Debug Directory from the search.
   -names               change section names as in the donor.
   -no-names            do not change section names.
-  -ext .extension      file extensions to process. multiple "-ext" supported. Default: ".exe" & ".dll".
+  -ext .extension      file extensions to process. multiple "-ext" supported. Default: ".exe", ".dll".
   -no-checksum         do not update the checksum.
   -with-donor          creates copy of donor in the "-out" directory.
 ```
