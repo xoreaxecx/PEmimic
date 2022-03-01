@@ -31,10 +31,15 @@ except ImportError:
         CYAN = '['
         RESET = ']'
 
+# ---  log separator  ---
 SEPARATOR = f'{"=" * 80}'
 
 # ---  file counter   ---
 COUNTER = 0
+
+# ---   debug info    ---
+CREATE_DEBUG_INFO_SESSION = False
+CREATE_DEBUG_INFO_SAMPLE = False
 
 # ---    checksum     ---
 USE_CHECKSUM_DLL = None
@@ -295,6 +300,7 @@ KNOWN_PRODUCT_IDS = {
 }
 
 
+# parts to search
 class Options:
     search_rich = True
     search_stamp = True
@@ -378,6 +384,7 @@ class Log:
             Log.__file.close()
 
 
+# contains information about PE section
 class Section:
     def __init__(self, struct_offset, section_struct):
         self.struct_offset = struct_offset
@@ -389,6 +396,7 @@ class Section:
         self.raddr = int.from_bytes(section_struct[20:24], 'little')
 
 
+# contains resource directory table
 class ResDir:
     def __init__(self, struct_offset, struct_bytes):
         self.struct_offset = struct_offset
@@ -427,7 +435,7 @@ class ResDir:
                           id_entries_count=self.id_entries_count)
 
 
-# Contains information only about current entry without trees and leaves.
+# Contains information only about current resource directory table without trees and leaves.
 # Used to reduce memory overhead during resource repackaging.
 class FlatResDir:
     def __init__(self, chracteristics, timedatestamp, major_version, minor_version, named_entries_count, id_entries_count):
@@ -447,6 +455,7 @@ class FlatResDir:
                self.id_entries_count.to_bytes(2, 'little')
 
 
+# Contains resource directory entry
 class ResDirEntry:
     def __init__(self, struct_offset, is_data_next, name_indent, name_offset, entry_bname, entry_id, next_entry_indent, next_entry_offset, next_entry):
         self.struct_offset = struct_offset
@@ -477,6 +486,7 @@ class ResDirEntry:
                                indent=self.next_entry_indent)
 
 
+# Contains information only about current resource directory entry without trees and leaves
 class FlatResDirEntry:
     def __init__(self, name_id, indent):
         self.name_id = name_id
@@ -487,6 +497,7 @@ class FlatResDirEntry:
                self.indent.to_bytes(4, 'little')
 
 
+# Contains resource data entry
 class ResDataEntry:
     def __init__(self, struct_offset, data_va, data_offset, data_size, code_page, reserved, data_bytes):
         self.struct_offset = struct_offset
@@ -525,6 +536,7 @@ class FlatResDataEntry:
                self.reserved.to_bytes(4, 'little')
 
 
+# contains summary of resources for repackaging
 class FlatResources:
     def __init__(self, struct_entries, name_entries, data_entries, last_indent):
         self.struct_entries = struct_entries
@@ -533,6 +545,7 @@ class FlatResources:
         self.last_indent = last_indent
 
 
+# contains part of PE to transplant
 class MimicPart:
     def __init__(self, hdr_offset=None, hdr_size=None, struct_offset=None, struct_size=None, data_offset=None, data_size=None):
         self.hdr_offset = hdr_offset
@@ -556,13 +569,8 @@ class MimicPart:
                 return struct_fits
         return False
 
-    def contains_data(self):
-        if self.hdr_offset or self.hdr_size or self.struct_offset or self.struct_size or self.data_offset or self.data_size:
-            return True
-        else:
-            return False
 
-
+# contains summary of PE parts for transplant
 class MimicPE:
     def __init__(self, path_to_file, e_lfanew, is_64, data, size, sections, rich, stamp, sign, dbgs, res, section_alignment=None, file_alignment=None):
         self.path = path_to_file
@@ -581,16 +589,8 @@ class MimicPE:
         self.section_alignment = section_alignment
         self.file_alignment = file_alignment
 
-    # def contains_data(self):
-    #     if self.rich or self.stamp or self.sign:
-    #         return True
-    #     else:
-    #         return False
 
-    # def count(self):
-    #     return int(self.rich is not None) + int(self.stamp is not None) + int(self.sign is not None) + int(self.dbgs is not None)
-
-
+# contains information of rich header
 class RichParsed:
     def __init__(self, data):
         self.warnings = []
@@ -646,6 +646,7 @@ def signal_handler(sig, frame):
     exit_program('KeyboardInterrupt.', 1)
 
 
+# stop execution and show message
 def continue_or_exit_msg(message=''):
     if message:
         print(f'{Back.RED}{message}{Back.RESET}')
@@ -654,11 +655,13 @@ def continue_or_exit_msg(message=''):
     input()
 
 
+# return resource entry name
 def get_name_from_offset(data, offset):
     name_size = int.from_bytes(data[offset:offset + 2], 'little') * 2 + 2
     return data[offset:offset + name_size]
 
 
+# return difference between virtual and raw addresses of section
 def get_offset_rva_delta(sections, rva):
     delta = 0
     for section in sections:
@@ -668,6 +671,7 @@ def get_offset_rva_delta(sections, rva):
     return delta
 
 
+# merge two resources into one
 def merge_resources(fst_res, snd_res, replace_vi, add_resources):
     if replace_vi or add_resources:
         new_res = copy.deepcopy(fst_res)
@@ -687,6 +691,7 @@ def merge_resources(fst_res, snd_res, replace_vi, add_resources):
         return new_res
 
 
+# check resource offset for EOF and recursiveness
 def __resource_offset_is_valid(offset, prev_offsets, eof, checking_original):
     if not 0 < offset < eof:
         if checking_original:
@@ -711,6 +716,7 @@ def __resource_offset_is_valid(offset, prev_offsets, eof, checking_original):
         return False
 
 
+# recursively collect all resource entryes
 def __get_resource_entries(data, entry_offset, start_offset, offset_va_delta, eof, checking_original, prev_offsets, lvl):
     if lvl > 32:
         if checking_original:
@@ -780,6 +786,7 @@ def __get_resource_entries(data, entry_offset, start_offset, offset_va_delta, eo
                        next_entry=next_entry)
 
 
+# collect all resource tables, entries and data
 def __get_resource_info(data, res_dir_offset, offset_va_delta, eof, checking_original):
     prev_offsets = []
     res_dir_struct = data[res_dir_offset:res_dir_offset + 16]
@@ -802,6 +809,7 @@ def __get_resource_info(data, res_dir_offset, offset_va_delta, eof, checking_ori
     return res_dir
 
 
+# collect indents to calculate pointers and alignment
 def get_level_indents(res_dir, lvl_indents, lvl):
     if lvl in lvl_indents:
         for i in range(lvl, len(lvl_indents)):
@@ -822,6 +830,7 @@ def get_level_indents(res_dir, lvl_indents, lvl):
             get_level_indents(entry.entry, lvl_indents, lvl=lvl + 1)
 
 
+# get flat entries from resource directory for repackaging
 def __get_flat_entries(res_dir, struct_entries, name_entries, data_entries, lvl_indents, lvl):
     if lvl in struct_entries:
         struct_entries[lvl].append(res_dir.to_flat_struct())
@@ -846,6 +855,7 @@ def __get_flat_entries(res_dir, struct_entries, name_entries, data_entries, lvl_
             name_entries.append((struct_entries[lvl][-1], entry.bname))
 
 
+# get flat resources for repackaging
 def get_flat_resources(res_dir):
     struct_entries = {}
     name_entries = []
@@ -864,6 +874,7 @@ def get_flat_resources(res_dir):
                          last_indent=lvl_indents[list(lvl_indents.keys())[-1]])
 
 
+# collect all PE resources
 def get_resources(data, e_lfanew, is_64, sections, eof, checking_original=False):
     if is_64:
         hdr_offset = e_lfanew + 152  # Resource Directory if PE32+: e_lfanew + 4 + 20 + 128
@@ -906,7 +917,7 @@ def update_checksum_py(data):
         if i == int(checksum_offset / 4):  # Skip the checksum field
             continue
         if i + 1 == (int(data_len / 4)) and remainder:
-            dword = struct.unpack('I', data[i * 4:] + (b'\0' * (4 - remainder)))[0]
+            dword = struct.unpack('I', data[i * 4:] + (b'\x00' * (4 - remainder)))[0]
         else:
             dword = struct.unpack('I', data[i * 4: i * 4 + 4])[0]
         checksum += dword
@@ -1025,6 +1036,7 @@ def get_space_for_rich(data, e_lfanew):
 
 
 # get PE rich
+# if original PE does not contain rich header, then a search will be made for a space to place it
 def get_rich(data, e_lfanew, checking_original=False):
     global RICH_MARK, DANS_MARK_B, RICH_START_OFFSET, RICH_MIN_SIZE
     rich_tail_offset = 0
@@ -1045,28 +1057,26 @@ def get_rich(data, e_lfanew, checking_original=False):
         j -= 1
 
     if 0 < rich_tail_offset < rich_head_offset:
-        return MimicPart(struct_offset=rich_tail_offset,
+        return MimicPart(hdr_offset=0,
+                         struct_offset=rich_tail_offset,
                          struct_size=rich_head_offset - rich_tail_offset)
     else:
         if checking_original and rich_tail_offset < rich_head_offset:
             message = 'Original file contains invalid Rich header struct.'
             continue_or_exit_msg(message)
         elif checking_original:
-            message = 'Original file does not contain "Rich" header.'
+            message = 'Original file does not contain Rich Header.'
             print(f'{Back.CYAN}{message}{Back.RESET}')
             Log.write(message)
             rich_size = get_space_for_rich(data, e_lfanew)
             if rich_size >= RICH_MIN_SIZE:
-                message = 'Free space found to place the "Rich" header.'
-                print(f'{Back.GREEN}{message}{Back.RESET}')
-                Log.write(message)
                 return MimicPart(struct_offset=RICH_START_OFFSET,
                                  struct_size=rich_size)
         return None
 
 
+# Rotate val to the left by num bits
 def _rol(val, num):
-    """Rotates val to the left by num bits."""
     return ((val << (num % 32)) & 0xffffffff) | (val >> (32 - (num % 32)))
 
 
@@ -1183,7 +1193,10 @@ def fix_rich_checksum(data, start_offset, rich: RichParsed, e_lfanew):
 
 
 # get debug info
-def get_dbg(data, e_lfanew, is_64, sections, eof, checking_original=False):
+# if original PE does not contain debug info and store_to_rsrc == True,
+# then donor debug info will be placed in resources
+def get_dbg(data, e_lfanew, is_64, sections, eof, checking_original=False, store_to_rsrc=False):
+    global CREATE_DEBUG_INFO_SESSION
     if is_64:
         hdr_offset = e_lfanew + 184  # Debug Directory if PE32+: e_lfanew + 4 + 20 + 160
     else:
@@ -1194,6 +1207,14 @@ def get_dbg(data, e_lfanew, is_64, sections, eof, checking_original=False):
             message = 'Original file does not contain Debug Directory.'
             print(f'{Back.CYAN}{message}{Back.RESET}')
             Log.write(message)
+            if store_to_rsrc:
+                CREATE_DEBUG_INFO_SESSION = True
+                return [MimicPart(hdr_offset=hdr_offset,
+                                  hdr_size=8,
+                                  struct_offset=0,
+                                  struct_size=28,
+                                  data_offset=0,
+                                  data_size=0)]
         return None
 
     delta_offset_va = get_offset_rva_delta(sections, struct_vaddr)
@@ -1206,21 +1227,39 @@ def get_dbg(data, e_lfanew, is_64, sections, eof, checking_original=False):
                       f'Struct offset:    {struct_offset}.\n' \
                       f'Struct full size: {struct_full_size}.'
             continue_or_exit_msg(message)
+            if store_to_rsrc:
+                CREATE_DEBUG_INFO_SESSION = True
+                return [MimicPart(hdr_offset=hdr_offset,
+                                  hdr_size=8,
+                                  struct_offset=0,
+                                  struct_size=28,
+                                  data_offset=0,
+                                  data_size=0)]
         return None
     struct_count = int.from_bytes(data[hdr_offset + 4:hdr_offset + 8], 'little') // 28
 
     dbgs = []
     while struct_count > 0:
         check_start = int.from_bytes(data[struct_offset:struct_offset + 4], 'little')
+        data_va = int.from_bytes(data[struct_offset + 20:struct_offset + 24], 'little')
         data_offset = int.from_bytes(data[struct_offset + 24:struct_offset + 28], 'little')
         data_size = int.from_bytes(data[struct_offset + 16:struct_offset + 20], 'little')
-        if check_start != 0 or data_offset == 0 or data_offset >= eof or data_size == 0 or data_size >= eof:
+        if check_start != 0 or data_offset > data_va or data_offset >= eof or data_size >= eof:
             if checking_original:
                 message = f'Original file contains invalid Debug Directory entry at {hex(struct_offset)}.\n' \
                           f'Entry check bytes: {check_start}.\n' \
+                          f'Entry AddressOfRawData: {data_va}.\n' \
                           f'Entry PointerToRawData: {data_offset}.\n' \
                           f'Entry SizeOfData: {data_size}.'
                 continue_or_exit_msg(message)
+                if store_to_rsrc:
+                    CREATE_DEBUG_INFO_SESSION = True
+                    return [MimicPart(hdr_offset=hdr_offset,
+                                      hdr_size=8,
+                                      struct_offset=0,
+                                      struct_size=28,
+                                      data_offset=0,
+                                      data_size=0)]
             return None
         dbgs.append(MimicPart(hdr_offset=hdr_offset,
                               hdr_size=8,
@@ -1262,7 +1301,7 @@ def get_sign(data, e_lfanew, is_64, eof, checking_original=False):
                          data_size=sign_size)
     elif checking_original:
         if sign_offset == 0 and sign_size == 0:
-            message = f'Original file does not contain authenticode sign.'
+            message = f'Original file does not contain Authenticode Sign.'
             print(f'{Back.CYAN}{message}{Back.RESET}')
             Log.write(message)
         else:
@@ -1486,9 +1525,9 @@ def check_64(data, e_lfanew, checking_original=False):
 
 
 # check original PE parts
-def check_original(path_to_file):
-    global SEPARATOR
-    with open(path_to_file, 'rb') as file:
+def check_original(args):
+    global SEPARATOR, CREATE_DEBUG_INFO_SESSION
+    with open(args.in_file, 'rb') as file:
         data = bytearray(file.read())
     pe_size = len(data)
     e_lfanew = int.from_bytes(data[0x3c:0x40], 'little')
@@ -1522,13 +1561,13 @@ def check_original(path_to_file):
         orig_rich = None
     # check original debug info
     if Options.search_dbg:
-        orig_dbgs = get_dbg(data, e_lfanew, is_64, orig_sections, pe_size, checking_original=True)
+        orig_dbgs = get_dbg(data, e_lfanew, is_64, orig_sections, pe_size, checking_original=True, store_to_rsrc=args.store_dbg_to_rsrc)
         if orig_dbgs is None:
             Options.search_dbg = False
     else:
         orig_dbgs = None
     # check original resources
-    if Options.search_res or Options.search_vi:
+    if any([Options.search_res, Options.search_vi, Options.search_dbg and args.store_dbg_to_rsrc]):
         orig_res = get_resources(data, e_lfanew, is_64, orig_sections, pe_size, checking_original=True)
         if orig_res is None:
             if Options.search_res:
@@ -1536,6 +1575,11 @@ def check_original(path_to_file):
             if Options.search_vi:
                 Options.search_vi = False
                 message = 'Due to lack of resource section, can not append VersionInfo.'
+                print(f'{Back.CYAN}{message}{Back.RESET}')
+                Log.write(message)
+            if Options.search_dbg and CREATE_DEBUG_INFO_SESSION:
+                Options.search_dbg = False
+                message = 'Due to lack of resource section, can not append Debug Info.'
                 print(f'{Back.CYAN}{message}{Back.RESET}')
                 Log.write(message)
         else:
@@ -1560,7 +1604,7 @@ def check_original(path_to_file):
         orig_sign = None
     Log.write(SEPARATOR)
     # collect received data
-    return MimicPE(path_to_file=path_to_file,
+    return MimicPE(path_to_file=args.in_file,
                    e_lfanew=e_lfanew,
                    is_64=is_64,
                    data=data,
@@ -1575,6 +1619,7 @@ def check_original(path_to_file):
                    file_alignment=fl_alignment)
 
 
+# check PE for transplant parts
 def get_donor(pe, donor_path, args):
     try:
         with open(donor_path, 'rb') as donor_file:
@@ -1639,6 +1684,7 @@ def get_donor(pe, donor_path, args):
         return None
 
 
+# set donor rich to sample
 def set_rich(sample_data, pe, donor, args, parts):
     donor_rich_data = donor.data[donor.rich.struct_offset:donor.rich.struct_offset + donor.rich.struct_size]
     if not args.no_rich_fix:
@@ -1649,46 +1695,106 @@ def set_rich(sample_data, pe, donor, args, parts):
     sample_data = sample_data[:pe.rich.struct_offset] + \
         donor_rich_data + b'\x00' * (pe.rich.struct_size - donor.rich.struct_size) + \
         sample_data[pe.rich.struct_offset + pe.rich.struct_size:]
-    parts['rich'] = f'Rich changed -> prev size: {pe.rich.struct_size} bytes -> new size: {donor.rich.struct_size} bytes.'
+    if pe.rich.hdr_offset is None:
+        parts['rich'] = f'Rich added -> size: {donor.rich.struct_size} bytes.'
+    else:
+        parts['rich'] = f'Rich changed -> prev size: {pe.rich.struct_size} bytes -> new size: {donor.rich.struct_size} bytes.'
     return sample_data
 
 
-def set_stammp(sample_data, pe, donor, parts):
+# set donor time stamp to sample
+def set_stamp(sample_data, pe, donor, parts):
     parts['timePE'] = 'PE time stamp changed.'
     return sample_data[:pe.stamp.struct_offset] + \
         donor.data[donor.stamp.struct_offset:donor.stamp.struct_offset + donor.stamp.struct_size] + \
         sample_data[pe.stamp.struct_offset + pe.stamp.struct_size:]
 
 
-def set_dbg(sample_data, pe, donor, parts):
+# clear debug info
+def clear_dbg(sample_data, dbgs):
+    # clear header
+    sample_data = sample_data[:dbgs[0].hdr_offset] + b'\x00' * dbgs[0].hdr_size + sample_data[dbgs[0].hdr_offset + dbgs[0].hdr_size:]
+    for dbg in dbgs:
+        if dbg.struct_offset:
+            # clear struct
+            sample_data = sample_data[:dbg.struct_offset] + b'\x00' * dbg.struct_size + sample_data[dbg.struct_offset + dbg.struct_size:]
+            if dbg.data_offset:
+                # clear data
+                sample_data = sample_data[:dbg.data_offset] + b'\x00' * dbg.data_size + sample_data[dbg.data_offset + dbg.data_size:]
+    return sample_data
+
+
+# collect debug information in one block to place in resources
+def dbg_to_resource_block(pe: MimicPE, start_offset, start_va):
+    dbg_struct = bytearray()
+    dbg_struct_size = pe.dbgs[0].struct_size * len(pe.dbgs)
+    pad = dbg_struct_size % 16
+    if pad > 0:
+        dbg_struct_size = dbg_struct_size + (16 - pad)
+    dbg_data = bytearray()
+
+    data_last_offset = start_offset + dbg_struct_size
+    data_last_va = start_va + dbg_struct_size
+    for dbg in pe.dbgs:
+        struct_va_offset = data_last_va.to_bytes(4, 'little') + data_last_offset.to_bytes(4, 'little')
+        data_last_offset += dbg.data_size
+        data_last_va += dbg.data_size
+        dbg_struct += pe.data[dbg.struct_offset:dbg.struct_offset + 20] + struct_va_offset
+        dbg_data += pe.data[dbg.data_offset:dbg.data_offset + dbg.data_size]
+
+    if pad > 0:
+        dbg_struct += b'\x00' * pad
+    pad = len(dbg_data) % 16
+    if pad > 0:
+        dbg_data += b'\x00' * pad
+    return dbg_struct + dbg_data
+
+
+# set donor debug info to sample
+def set_dbg(sample_data, pe, donor, parts, dbg_to_rsrc):
+    global CREATE_DEBUG_INFO_SAMPLE
     pe.dbgs.sort(key=operator.attrgetter('data_size'))
     donor.dbgs.sort(key=operator.attrgetter('data_size'), reverse=True)
-    changed = 0
+    count = 0
 
     for odbg in pe.dbgs:
         ddc = 0
         while ddc < len(donor.dbgs):
             if odbg.fits(donor.dbgs[ddc]):
-                changed += 1
+                changed = False
                 ddbg = donor.dbgs.pop(ddc)
-                if odbg.data_size != ddbg.data_size:
+                if odbg.data_size != ddbg.data_size and all([odbg.struct_offset, ddbg.struct_offset]):
                     dbg_entry = donor.data[ddbg.struct_offset:ddbg.struct_offset + 20] + sample_data[odbg.struct_offset + 20:odbg.struct_offset + 28]
                     sample_data = sample_data[:odbg.struct_offset] + dbg_entry + sample_data[odbg.struct_offset + odbg.struct_size:]
-                sample_data = sample_data[:odbg.data_offset] + \
-                    donor.data[ddbg.data_offset:ddbg.data_offset + ddbg.data_size] + \
-                    b'\x00' * (odbg.data_size - ddbg.data_size) + \
-                    sample_data[odbg.data_offset + odbg.data_size:]
+                    changed = True
+                if all([odbg.data_offset, ddbg.data_offset]):
+                    sample_data = sample_data[:odbg.data_offset] + \
+                        donor.data[ddbg.data_offset:ddbg.data_offset + ddbg.data_size] + \
+                        b'\x00' * (odbg.data_size - ddbg.data_size) + \
+                        sample_data[odbg.data_offset + odbg.data_size:]
+                    changed = True
+                count += int(changed)
                 break
             else:
                 ddc += 1
-    parts[f'dbg_{changed}of{len(pe.dbgs)}'] = f'Debug info -> total count: {len(pe.dbgs)} -> changed count: {changed}.'
+    if count > 0:
+        parts[f'dbg_{count}of{len(pe.dbgs)}'] = f'Debug info changed -> total count: {len(pe.dbgs)} -> changed count: {count}.'
+    elif dbg_to_rsrc:
+        CREATE_DEBUG_INFO_SAMPLE = True
+    else:
+        parts[f'dbg_{count}of{len(pe.dbgs)}'] = f'Debug info NOT changed. None of the records fit.'
     return sample_data
 
 
+# add donor resources to sample
 # returns tuple(sample_data, end_of_rsrc_data)
 def set_resources(sample_data, pe, donor, parts):
-    merged_res = merge_resources(pe.res, donor.res, Options.search_vi, Options.search_res)
-    flat_resources = get_flat_resources(merged_res)
+    global CREATE_DEBUG_INFO_SESSION, CREATE_DEBUG_INFO_SAMPLE
+    if donor.res:
+        merged_res = merge_resources(pe.res, donor.res, Options.search_vi, Options.search_res)
+        flat_resources = get_flat_resources(merged_res)
+    else:
+        flat_resources = get_flat_resources(pe.res)
 
     rsrc_name_entries = bytearray()
     for ne in flat_resources.name_entries:
@@ -1730,29 +1836,45 @@ def set_resources(sample_data, pe, donor, parts):
     if pad > 0:
         rsrc_bytes += (pe.file_alignment - pad) * b'\x00'
         rsrc_rsz = len(rsrc_bytes)
+    if CREATE_DEBUG_INFO_SESSION or CREATE_DEBUG_INFO_SAMPLE:
+        if CREATE_DEBUG_INFO_SAMPLE:
+            # clear prev debug info
+            sample_data = clear_dbg(sample_data, pe.dbgs)
+        dbg_raddr = rsrc_section.raddr + rsrc_rsz
+        dbg_vaddr = rsrc_section.vaddr + rsrc_rsz
+        # get new debug info header va and size
+        dbg_info_struct = dbg_vaddr.to_bytes(4, 'little') + (len(donor.dbgs) * donor.dbgs[0].struct_size).to_bytes(4, 'little')
+        # set new debug info header
+        sample_data = sample_data[:pe.dbgs[0].hdr_offset] + dbg_info_struct + sample_data[pe.dbgs[0].hdr_offset + pe.dbgs[0].hdr_size:]
+        # get new debug info block to place to the resources
+        block = dbg_to_resource_block(donor, dbg_raddr, dbg_vaddr)
+        # set new debug info block
+        rsrc_bytes += block
+        rsrc_rsz = len(rsrc_bytes)
+        pad = rsrc_rsz % 16
+        if pad > 0:
+            rsrc_bytes += (16 - pad) * b'\x00'
+            rsrc_rsz = len(rsrc_bytes)
+        parts[f'dbgres_{len(donor.dbgs)}'] = f'Debug info added -> prev count: {len(pe.dbgs) * int(pe.dbgs[0].struct_offset > 0)} -> new count: {len(donor.dbgs)}.'
+        CREATE_DEBUG_INFO_SAMPLE = False
     sample_end_of_data = rsrc_section.raddr + rsrc_rsz
     if rsrc_rsz != rsrc_section.rsize:
-
         # change SizeOfRawData in .rsrc section struct
         sample_data = sample_data[:rsrc_section.struct_offset + 16] + rsrc_rsz.to_bytes(4, 'little') + sample_data[rsrc_section.struct_offset + 20:]
-
         # SizeOfInitializedData offset = e_lfanew + 4 + 20 + 8
         size_of_init_data = int.from_bytes(sample_data[pe.e_lfanew + 32:pe.e_lfanew + 36], 'little')
         if rsrc_rsz > rsrc_section.rsize:
             size_of_init_data += rsrc_rsz - rsrc_section.rsize
         else:
             size_of_init_data += rsrc_section.rsize - rsrc_rsz
-
         # change SizeOfInitializedData
         sample_data = sample_data[:pe.e_lfanew + 32] + size_of_init_data.to_bytes(4, 'little') + sample_data[pe.e_lfanew + 36:]
-
         # change VirtualSize in .rsrc section struct
         rsrc_vsz = rsrc_section.vsize
         if rsrc_rsz > rsrc_vsz:
             rsrc_vsz = rsrc_rsz
             sample_data = sample_data[:rsrc_section.struct_offset + 8] + rsrc_vsz.to_bytes(4, 'little') + sample_data[rsrc_section.struct_offset + 12:]
         size_of_image = rsrc_section.vaddr + rsrc_vsz
-
         # calculate new addresses for next sections
         if len(next_sections) > 0:
             rpointer = rsrc_section.raddr + rsrc_rsz
@@ -1761,19 +1883,15 @@ def set_resources(sample_data, pe, donor, parts):
                 pad = vpointer % pe.section_alignment
                 if pad > 0:
                     vpointer += pe.section_alignment - pad
-
                 # change VirtualAddress of next section
                 sample_data = sample_data[:ns.struct_offset + 12] + vpointer.to_bytes(4, 'little') + sample_data[ns.struct_offset + 16:]
-
                 # change PointerToRawData of next section
                 sample_data = sample_data[:ns.struct_offset + 20] + rpointer.to_bytes(4, 'little') + sample_data[ns.struct_offset + 24:]
                 rpointer += ns.rsize
                 vpointer += ns.vsize
-
             # SizeOfImage offset = e_lfanew + 4 + 20 + 56
             size_of_image = vpointer
             sample_end_of_data = rpointer
-
         # change SizeOfImage
         sample_data = sample_data[:pe.e_lfanew + 80] + size_of_image.to_bytes(4, 'little') + sample_data[pe.e_lfanew + 84:]
 
@@ -1787,11 +1905,18 @@ def set_resources(sample_data, pe, donor, parts):
     return tuple([sample_data[:rsrc_section.raddr] + rsrc_bytes + sample_data[rsrc_section.raddr + rsrc_section.rsize:], sample_end_of_data])
 
 
+# set donor sign to sample
 def set_sign(sample_data, pe, donor, parts, sample_end_of_data):
     if sample_end_of_data < pe.sign.data_offset:
         sample_end_of_data = pe.sign.data_offset
+
     if pe.sign.data_size != donor.sign.data_size:  # change size of data in struct if needed
-        dd_entry = sample_end_of_data.to_bytes(4, 'little') + donor.sign.data_size.to_bytes(4, 'little')
+        overlay_size = len(sample_data[sample_end_of_data + pe.sign.data_size:])
+        pad = overlay_size % 8
+        if pad > 0:
+            sample_data += b'\x00' * (8 - pad)
+            overlay_size = len(sample_data[sample_end_of_data + pe.sign.data_size:])
+        dd_entry = sample_end_of_data.to_bytes(4, 'little') + (donor.sign.data_size + overlay_size).to_bytes(4, 'little')
         sample_data = sample_data[:pe.sign.hdr_offset] + dd_entry + sample_data[pe.sign.hdr_offset + pe.sign.hdr_size:]
     if pe.sign.data_size == 0:
         parts['sign'] = f'Sign added -> size: {donor.sign.data_size} bytes.'
@@ -1802,20 +1927,22 @@ def set_sign(sample_data, pe, donor, parts, sample_end_of_data):
         sample_data[sample_end_of_data + pe.sign.data_size:]
 
 
+# collect data for new sample
 def get_sample_data(pe, donor, args, parts):
+    global CREATE_DEBUG_INFO_SESSION, CREATE_DEBUG_INFO_SAMPLE
     sample_data = bytearray(pe.data)
     # transplant rich from donor
     if Options.search_rich and donor.rich:
         sample_data = set_rich(sample_data, pe, donor, args, parts)
     # transplant time stamp from donor
     if Options.search_stamp and donor.stamp:
-        sample_data = set_stammp(sample_data, pe, donor, parts)
+        sample_data = set_stamp(sample_data, pe, donor, parts)
     # transplant debug info from donor
-    if Options.search_dbg and donor.dbgs:
-        sample_data = set_dbg(sample_data, pe, donor, parts)
+    if Options.search_dbg and donor.dbgs and not CREATE_DEBUG_INFO_SESSION:
+        sample_data = set_dbg(sample_data, pe, donor, parts, args.store_dbg_to_rsrc)
     sample_end_of_data = 0
     # transplant resources from donor
-    if (Options.search_res or Options.search_vi) and donor.res:
+    if ((Options.search_res or Options.search_vi) and donor.res) or ((CREATE_DEBUG_INFO_SESSION or CREATE_DEBUG_INFO_SAMPLE) and pe.res):
         resource_result = set_resources(sample_data, pe, donor, parts)
         sample_data = resource_result[0]
         sample_end_of_data = resource_result[1]
@@ -1831,11 +1958,12 @@ def get_sample_data(pe, donor, args, parts):
     return sample_data
 
 
+# save sample with verbose name
 def save_sample(sample_data, pe, donor, args, parts):
     global COUNTER, SEPARATOR
     COUNTER += 1
     args.limit -= 1
-    sample_name = f'{str(COUNTER)}_{pe.name}-{donor.name}_{"-".join(parts.keys())}{pe.ext}'
+    sample_name = f'{str(COUNTER)}_{pe.name}_{donor.name}-{"-".join(parts.keys())}{pe.ext}'
     Log.write(sample_name)
     sample_path = os.path.join(args.out_dir, sample_name)
     parts['message'] = f'Donor : {donor.path}\nSample: {sample_path}'
@@ -1851,6 +1979,7 @@ def save_sample(sample_data, pe, donor, args, parts):
     Log.write(SEPARATOR)
 
 
+# create new sample
 def parts_transplant(pe, donor, args):
     parts = {}
     sample_data = get_sample_data(pe, donor, args, parts)
@@ -1904,12 +2033,13 @@ if __name__ == '__main__':
     parser.add_argument('-no-vi', dest='no_vi', action='store_true', help='removes VersionInfo from the search.')
     parser.add_argument('-res', action='store_true', help='adds resournces to the search.')
     parser.add_argument('-no-res', dest='no_res', action='store_true', help='removes resournces from the search.')
-    parser.add_argument('-dbg', action='store_true', help='adds Debug Directory to the search.')
-    parser.add_argument('-no-dbg', dest='no_dbg', action='store_true', help='removes Debug Directory from the search.')
+    parser.add_argument('-dbg', action='store_true', help='adds Debug Info to the search.')
+    parser.add_argument('-no-dbg', dest='no_dbg', action='store_true', help='removes Debug Info from the search.')
     parser.add_argument('-names', action='store_true', help='change section names as in the donor.')
     parser.add_argument('-no-names', dest='no_names', action='store_true', help='do not change section names.')
     parser.add_argument('-ext', metavar='.extension', action='append', default=None,
                         help='file extensions to process. multiple "-ext" supported. Default: ".exe" & ".dll".')
+    parser.add_argument('-no-dbg-rsrc', dest='store_dbg_to_rsrc', action='store_false', help='do not add Debug Info to the resources if it is missing or does not fit in size.')
     parser.add_argument('-no-checksum', dest='upd_checksum', action='store_false', help='do not update the checksum.')
     parser.add_argument('-with-donor', dest='with_donor', action='store_true', help='creates copy of donor in the "-out" directory.')
     initargs = parser.parse_args()
@@ -1918,7 +2048,6 @@ if __name__ == '__main__':
     check_args(initargs)                                    # check for argument conflicts
     set_options(initargs)                                   # set options for search
     Log.init(initargs)                                      # Log initialization
-    original_pe = check_original(initargs.in_file)          # check original file
+    original_pe = check_original(initargs)                  # check original file
     search_donors(original_pe, initargs)                    # search donors for original file
     exit_program(f'Files savad in: {initargs.out_dir}', 0)  # cleanup and exit
-
