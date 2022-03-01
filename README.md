@@ -60,11 +60,12 @@ optional arguments:
   -no-vi               removes VersionInfo from the search.
   -res                 adds resournces to the search.
   -no-res              removes resournces from the search.
-  -dbg                 adds Debug Directory to the search.
-  -no-dbg              removes Debug Directory from the search.
+  -dbg                 adds Debug Info to the search.
+  -no-dbg              removes Debug Info from the search.
   -names               change section names as in the donor.
   -no-names            do not change section names.
-  -ext .extension      file extensions to process. multiple "-ext" supported. Default: ".exe", ".dll".
+  -ext .extension      file extensions to process. multiple "-ext" supported. Default: ".exe" & ".dll".
+  -no-dbg-rsrc         do not add Debug Info to the resources if it is missing or does not fit in size.
   -no-checksum         do not update the checksum.
   -with-donor          creates copy of donor in the "-out" directory.
 ```
