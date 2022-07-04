@@ -85,10 +85,11 @@ python PEmimic.py -in "C:\tmp\hi_64.exe" -limit 1
   Imports after:  
   ![imp_after](https://github.com/xoreaxecx/PEmimic/blob/main/examples/pic_imp_after.jpg)  
   
-</details>
+</details>  
+
 ---
 
-Help:
+### Help:
 ```
 usage: pemimic.py [-h] -in path/to/file [-out path/to/dir] [-sd search/dir/path] 
                   [-d depth] [-limit int] [-approx] [-rich] [-no-rich-fix] [-no-rich] 
