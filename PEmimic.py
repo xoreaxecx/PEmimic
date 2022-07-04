@@ -1,5 +1,5 @@
 # Finds a file-donor according to the selected criteria and transplants its parts.
-# Dependencies: pip install colorama
+# Dependencies: pip install colorama capstone
 import argparse
 import copy
 import ctypes as ct
@@ -10,6 +10,7 @@ import struct
 import sys
 import time
 from datetime import date
+from random import shuffle
 
 try:
     from colorama import init, Back
@@ -30,6 +31,15 @@ except ImportError:
         BLACK = '['
         CYAN = '['
         RESET = ']'
+
+# capstone module used only for import shuffling
+try:
+    import capstone
+except ImportError:
+    capstone = None
+
+# ---  system drive   ---
+SYS_DRIVE = os.getenv("SystemDrive")
 
 # ---  log separator  ---
 SEPARATOR = f'{"=" * 80}'
@@ -299,6 +309,21 @@ KNOWN_PRODUCT_IDS = {
   270: "Utc1900_POGO_O_CPP"
 }
 
+# ---     imports     ---
+IMPORT_NAME_LENGTH_LIMIT = 4096
+NULL_DWORD = b'\x00\x00\x00\x00'
+NULL_QWORD = b'\x00\x00\x00\x00\x00\x00\x00\x00'
+IMPORT_DLL_STRUCT_SIZE = 20
+IMPORT_DLL_EMPTY_STRUCT = b'\x00' * IMPORT_DLL_STRUCT_SIZE
+IMPORT_NAME_MIN_OFFSET = -1
+IMPORT_NAME_MAX_OFFSET = -1
+IMPORT_OFT_MIN_OFFSET = -1
+IMPORT_FT_MIN_OFFSET = -1
+IMPORT_OFT_DELTA = -1
+IMPORT_FT_DELTA = -1
+TARGET_INSTRUCTIONS = ['call', 'jmp', 'mov']
+IMPORT_CALLS = {}  # {func_offset : [instruction_objs]}
+
 
 # parts to search
 class Options:
@@ -308,6 +333,7 @@ class Options:
     search_vi = True
     search_dbg = True
     search_res = True
+    shuffle_imp = True
     change_names = True
 
     @staticmethod
@@ -318,6 +344,7 @@ class Options:
         Options.search_vi = True
         Options.search_dbg = True
         Options.search_res = True
+        Options.shuffle_imp = True
         Options.change_names = True
 
     @staticmethod
@@ -328,11 +355,16 @@ class Options:
         Options.search_vi = False
         Options.search_dbg = False
         Options.search_res = False
+        Options.shuffle_imp = False
         Options.change_names = False
 
     @staticmethod
     def get_search_count():
-        return Options.search_rich + Options.search_stamp + Options.search_sign + Options.search_vi + Options.search_dbg + Options.search_res
+        return Options.search_rich + Options.search_stamp + Options.search_sign + Options.search_vi + Options.search_dbg + Options.search_res + Options.shuffle_imp + Options.change_names
+
+    @staticmethod
+    def donor_needed():
+        return any([Options.search_rich, Options.search_stamp, Options.search_sign, Options.search_vi, Options.search_dbg, Options.search_res, Options.change_names])
 
     @staticmethod
     def get_string_options():
@@ -349,6 +381,8 @@ class Options:
             options.append('dbg')
         if Options.search_res:
             options.append('res')
+        if Options.shuffle_imp:
+            options.append('imp')
         if Options.change_names:
             options.append('names')
         return '-'.join(options)
@@ -394,6 +428,7 @@ class Section:
         self.vaddr = int.from_bytes(section_struct[12:16], 'little')
         self.rsize = int.from_bytes(section_struct[16:20], 'little')
         self.raddr = int.from_bytes(section_struct[20:24], 'little')
+        self.va_offset_delta = self.vaddr - self.raddr
 
 
 # contains resource directory table
@@ -572,11 +607,14 @@ class MimicPart:
 
 # contains summary of PE parts for transplant
 class MimicPE:
-    def __init__(self, path_to_file, e_lfanew, is_64, data, size, sections, rich, stamp, sign, dbgs, res, section_alignment=None, file_alignment=None):
+    def __init__(self, path_to_file, e_lfanew, is_64, data, size, sections, rich, stamp, sign, dbgs, res, baseofcode=0, entrypoint=0, imagebase=0, relocs=None, imports=None, section_alignment=None, file_alignment=None):
         self.path = path_to_file
         self.name = os.path.splitext(os.path.split(path_to_file)[1])[0]
         self.ext = os.path.splitext(os.path.split(path_to_file)[1])[1]
         self.e_lfanew = e_lfanew
+        self.baseofcode = baseofcode
+        self.entrypoint = entrypoint
+        self.imagebase = imagebase
         self.is_64 = is_64
         self.data = data
         self.size = size
@@ -586,6 +624,8 @@ class MimicPE:
         self.sign = sign
         self.dbgs = dbgs
         self.res = res
+        self.relocs = relocs
+        self.imports = imports
         self.section_alignment = section_alignment
         self.file_alignment = file_alignment
 
@@ -628,6 +668,106 @@ class RichParsed:
         return b''.join(result)
 
 
+# contains information of all imported dlls and functions
+class ImportDir:
+    def __init__(self, hdr_offset, struct_offset, struct_size, dlls, dll_count, func_count, va_list):
+        self.hdr_offset = hdr_offset
+        self.hdr_size = 8
+        self.struct_offset = struct_offset
+        self.struct_size = struct_size
+        self.dlls = dlls
+        self.dll_count = dll_count
+        self.func_count = func_count
+        self.va_list = va_list
+
+
+# contains information of imported dll
+class ImportDll:
+    def __init__(self, index, struct_offset, oft_rva, oft_delta, timedatestamp, forwarderchain, name, bname, name_rva, name_delta, ft_rva, ft_delta):
+        self.index = index
+        self.struct_offset = struct_offset
+        self.oft_rva = oft_rva
+        self.oft_delta = oft_delta
+        self.oft_offset = oft_rva - oft_delta if oft_rva > 0 else 0
+        self.timeDateStamp = timedatestamp
+        self.forwarderChain = forwarderchain
+        self.name_rva = name_rva
+        self.name_delta = name_delta
+        self.name_offset = name_rva - name_delta if name_rva > 0 else 0
+        self.name = name
+        self.name_len = len(name)
+        self.bname = bname
+        self.bname_size = len(name) + 1
+        self.bname_size_padded = self.bname_size + (self.name_rva + self.bname_size) % 2
+        self.ft_rva = ft_rva
+        self.ft_delta = ft_delta
+        self.ft_offset = ft_rva - ft_delta if ft_rva > 0 else 0
+        self.funcs = []
+
+    def to_bytes(self):
+        return self.oft_rva.to_bytes(4, 'little') + \
+               self.timeDateStamp.to_bytes(4, 'little') + \
+               self.forwarderChain.to_bytes(4, 'little') + \
+               self.name_rva.to_bytes(4, 'little') + \
+               self.ft_rva.to_bytes(4, 'little')
+
+
+# contains information of imported function
+class ImportFunc:
+    def __init__(self, index, func_rva, func_va, struct_offset, struct_size, is_ordinal, hint_name_delta=0, ordinal=b'', hint=b'', hint_name_rva=0, name='', bname=b''):
+        self.index = index
+        self.func_rva = func_rva
+        self.func_va = func_va
+        self.struct_offset = struct_offset
+        self.struct_size = struct_size
+        self.is_ordinal = is_ordinal
+        self.ordinal = ordinal
+        self.hint_name_rva = hint_name_rva
+        self.hint_name_delta = hint_name_delta
+        self.hint_name_offset = hint_name_rva - hint_name_delta if hint_name_rva > 0 else 0
+        self.hint_name_size = self.__set_hint_name_size(hint_name_rva, is_ordinal, name)
+        self.hint = hint
+        self.name = name
+        self.name_len = len(name)
+        self.bname = bname
+
+    @staticmethod
+    def __set_hint_name_size(rva, is_ordinal, name):
+        if is_ordinal:
+            return 0
+        else:
+            return len(name) + 3 + (rva - 1 + len(name)) % 2
+
+
+# contains information of Relocation Table
+class RelocTable:
+    def __init__(self, hdr_offset, struct_offset, struct_size, blocks):
+        self.hdr_offset = hdr_offset
+        self.hdr_size = 8
+        self.struct_offset = struct_offset
+        self.struct_size = struct_size
+        self.blocks = blocks
+
+
+# contains information of Relocation Table block
+class RelocBlock:
+    def __init__(self, rva, size, delta, data: bytearray):
+        self.rva = rva
+        self.size = size
+        self.entries = [RelocEntry(data[i:i + 2], self.rva, delta) for i in range(0, len(data), 2)]
+
+
+# contains information of Relocation Table block entry
+class RelocEntry:
+    def __init__(self, data: bytearray, rva, delta):
+        # get first 4 bits which is type
+        self.type = (data[1] >> 4) & 0xf
+        # get rva offset value and clear first 4 bits
+        self.rva_offset = int.from_bytes(data, 'little') & 0x0fff
+        # get offset
+        self.offset = rva + self.rva_offset - delta
+
+
 # cleanup and exit
 def exit_program(message='', code=2):
     colors = {0: Back.BLACK,
@@ -662,12 +802,17 @@ def get_name_from_offset(data, offset):
 
 
 # return difference between virtual and raw addresses of section
-def get_offset_rva_delta(sections, rva):
-    delta = 0
-    for section in sections:
-        if section.vaddr <= rva < section.vaddr + section.rsize:
-            delta = section.vaddr - section.raddr
-            break
+def get_offset_rva_delta(sections, rva, target_section=None):
+    delta = -1
+    if rva > 0:
+        if target_section:
+            if target_section.vaddr <= rva < target_section.vaddr + target_section.rsize:
+                delta = target_section.va_offset_delta
+        if delta == -1:
+            for section in sections:
+                if section.vaddr <= rva < section.vaddr + section.rsize:
+                    delta = section.va_offset_delta
+                    break
     return delta
 
 
@@ -692,7 +837,7 @@ def merge_resources(fst_res, snd_res, replace_vi, add_resources):
 
 
 # check resource offset for EOF and recursiveness
-def __resource_offset_is_valid(offset, prev_offsets, eof, checking_original):
+def resource_offset_is_valid(offset, prev_offsets, eof, checking_original):
     if not 0 < offset < eof:
         if checking_original:
             message = f'Original file contains invalid resource entry.\n' \
@@ -717,7 +862,7 @@ def __resource_offset_is_valid(offset, prev_offsets, eof, checking_original):
 
 
 # recursively collect all resource entryes
-def __get_resource_entries(data, entry_offset, start_offset, offset_va_delta, eof, checking_original, prev_offsets, lvl):
+def get_resource_entries(data, entry_offset, start_offset, offset_va_delta, eof, checking_original, prev_offsets, lvl):
     if lvl > 32:
         if checking_original:
             message = f'Original file contains invalid resource depth.\n' \
@@ -743,7 +888,7 @@ def __get_resource_entries(data, entry_offset, start_offset, offset_va_delta, eo
     indent_bytes = data[entry_offset + 4:entry_offset + 8]
     next_entry_indent = int.from_bytes(indent_bytes, 'little')
     next_entry_offset = start_offset + int.from_bytes(indent_bytes[:-1], 'little')
-    if not __resource_offset_is_valid(next_entry_offset, prev_offsets, eof, checking_original):
+    if not resource_offset_is_valid(next_entry_offset, prev_offsets, eof, checking_original):
         return None
 
     is_data_next = indent_bytes[-1] & 0b10000000 == 0
@@ -766,9 +911,9 @@ def __get_resource_entries(data, entry_offset, start_offset, offset_va_delta, eo
         fst_offset = next_entry.struct_offset + next_entry.struct_size
         while i < next_entry.entries_count:
             offset = fst_offset + i * 8
-            if not __resource_offset_is_valid(offset, prev_offsets, eof, checking_original):
+            if not resource_offset_is_valid(offset, prev_offsets, eof, checking_original):
                 return None
-            entry = __get_resource_entries(data, offset, start_offset, offset_va_delta, eof, checking_original, prev_offsets, lvl=lvl + 1)
+            entry = get_resource_entries(data, offset, start_offset, offset_va_delta, eof, checking_original, prev_offsets, lvl=lvl + 1)
             if entry is None:
                 return None
             else:
@@ -787,7 +932,7 @@ def __get_resource_entries(data, entry_offset, start_offset, offset_va_delta, eo
 
 
 # collect all resource tables, entries and data
-def __get_resource_info(data, res_dir_offset, offset_va_delta, eof, checking_original):
+def get_resource_info(data, res_dir_offset, offset_va_delta, eof, checking_original):
     prev_offsets = []
     res_dir_struct = data[res_dir_offset:res_dir_offset + 16]
     res_dir = ResDir(res_dir_offset, res_dir_struct)
@@ -795,10 +940,10 @@ def __get_resource_info(data, res_dir_offset, offset_va_delta, eof, checking_ori
     fst_offset = res_dir.struct_offset + res_dir.struct_size
     while i < res_dir.entries_count:
         offset = fst_offset + i * 8
-        if not __resource_offset_is_valid(offset, prev_offsets, eof, checking_original):
+        if not resource_offset_is_valid(offset, prev_offsets, eof, checking_original):
             return None
 
-        entry = __get_resource_entries(data, offset, res_dir_offset, offset_va_delta, eof, checking_original, prev_offsets, lvl=0)
+        entry = get_resource_entries(data, offset, res_dir_offset, offset_va_delta, eof, checking_original, prev_offsets, lvl=0)
         if entry is None:
             return None
         if entry.id is not None and entry.id == 16:
@@ -831,7 +976,7 @@ def get_level_indents(res_dir, lvl_indents, lvl):
 
 
 # get flat entries from resource directory for repackaging
-def __get_flat_entries(res_dir, struct_entries, name_entries, data_entries, lvl_indents, lvl):
+def get_flat_entries(res_dir, struct_entries, name_entries, data_entries, lvl_indents, lvl):
     if lvl in struct_entries:
         struct_entries[lvl].append(res_dir.to_flat_struct())
     else:
@@ -850,7 +995,7 @@ def __get_flat_entries(res_dir, struct_entries, name_entries, data_entries, lvl_
         else:
             struct_entries[lvl][-1].indent = lvl_indents[lvl] + 2147483648  # 2147483648 is 80000000 to set high bit
             lvl_indents[lvl] += entry.entry.block_size
-            __get_flat_entries(entry.entry, struct_entries, name_entries, data_entries, lvl_indents, lvl=lvl + 1)
+            get_flat_entries(entry.entry, struct_entries, name_entries, data_entries, lvl_indents, lvl=lvl + 1)
         if entry.id is None:
             name_entries.append((struct_entries[lvl][-1], entry.bname))
 
@@ -867,7 +1012,7 @@ def get_flat_resources(res_dir):
         res_dir.entries.append(res_dir.vi)
 
     get_level_indents(res_dir, lvl_indents, lvl)
-    __get_flat_entries(res_dir, struct_entries, name_entries, data_entries, lvl_indents, lvl)
+    get_flat_entries(res_dir, struct_entries, name_entries, data_entries, lvl_indents, lvl)
     return FlatResources(struct_entries=struct_entries,
                          name_entries=name_entries,
                          data_entries=data_entries,
@@ -892,7 +1037,7 @@ def get_resources(data, e_lfanew, is_64, sections, eof, checking_original=False)
     delta_offset_va = get_offset_rva_delta(sections, res_dir_vaddr)
 
     res_dir_offset = res_dir_vaddr - delta_offset_va
-    if res_dir_offset <= 0 or delta_offset_va == 0:
+    if res_dir_offset <= 0 or delta_offset_va < 0:
         if checking_original:
             message = f'Original file contains invalid Resource Directory RVA.\n' \
                       f'Resource Directory RVA:    {res_dir_vaddr}.\n' \
@@ -900,7 +1045,7 @@ def get_resources(data, e_lfanew, is_64, sections, eof, checking_original=False)
                       f'Delta offset-va:           {delta_offset_va}.'
             continue_or_exit_msg(message)
         return None
-    res_structs = __get_resource_info(data, res_dir_offset, delta_offset_va, eof, checking_original)
+    res_structs = get_resource_info(data, res_dir_offset, delta_offset_va, eof, checking_original)
     return res_structs
 
 
@@ -1092,22 +1237,23 @@ def get_iat_func_count(data, sections, e_lfanew):
     if import_dir_rva > 0:
         delta = get_offset_rva_delta(sections, import_dir_rva)
 
-        dll_struct_sz = 20
-        dll_empty_struct = b'\x00' * dll_struct_sz
-        func_empty_struct = b'\x00\x00\x00\x00'
-        dll_offset = import_dir_rva - delta
-        dll_struct = data[dll_offset:dll_offset + dll_struct_sz]
-        while dll_struct != dll_empty_struct:
-            oft = int.from_bytes(dll_struct[0:4], 'little') - delta
-            ft = int.from_bytes(dll_struct[16:20], 'little') - delta
-            func_offset = ft if ft > 0 else oft
-            func_struct = data[func_offset:func_offset + 4]
-            while func_struct != func_empty_struct:
-                func_count += 1
-                func_offset += 4
-                func_struct = data[func_offset:func_offset + 4]
-            dll_offset += dll_struct_sz
+        if delta >= 0:
+            dll_struct_sz = 20
+            dll_empty_struct = b'\x00' * dll_struct_sz
+            func_empty_struct = b'\x00\x00\x00\x00'
+            dll_offset = import_dir_rva - delta
             dll_struct = data[dll_offset:dll_offset + dll_struct_sz]
+            while dll_struct != dll_empty_struct:
+                oft = int.from_bytes(dll_struct[0:4], 'little') - delta
+                ft = int.from_bytes(dll_struct[16:20], 'little') - delta
+                func_offset = ft if ft > 0 else oft
+                func_struct = data[func_offset:func_offset + 4]
+                while func_struct != func_empty_struct:
+                    func_count += 1
+                    func_offset += 4
+                    func_struct = data[func_offset:func_offset + 4]
+                dll_offset += dll_struct_sz
+                dll_struct = data[dll_offset:dll_offset + dll_struct_sz]
     return func_count
 
 
@@ -1220,7 +1366,7 @@ def get_dbg(data, e_lfanew, is_64, sections, eof, checking_original=False, store
     delta_offset_va = get_offset_rva_delta(sections, struct_vaddr)
     struct_offset = struct_vaddr - delta_offset_va
     struct_full_size = int.from_bytes(data[hdr_offset + 4:hdr_offset + 8], 'little')
-    if struct_offset <= 0 or struct_offset >= eof or struct_full_size == 0 or struct_full_size % 28 != 0:
+    if struct_offset <= 0 or struct_offset >= eof or struct_full_size == 0 or struct_full_size % 28 != 0 or delta_offset_va < 0:
         if checking_original:
             message = f'Original file contains invalid Debug Directory struct.\n' \
                       f'Struct VA:        {struct_vaddr}.\n' \
@@ -1327,7 +1473,7 @@ def get_vi(data, e_lfanew, is_64, sections):
         return None
 
     delta_offset_va = get_offset_rva_delta(sections, res_dir_vaddr)
-    if delta_offset_va <= 0:
+    if delta_offset_va < 0:
         return None
 
     res_dir_offset = res_dir_vaddr - delta_offset_va  # Resource Directory offset
@@ -1393,6 +1539,455 @@ def get_vi(data, e_lfanew, is_64, sections):
             level += 1
 
 
+# get name from offset
+# if get_bytes=True, returns bytes, else string
+def get_import_name_from_offset(data, offset, eof, get_bytes=False):
+    end_offset = offset
+    while end_offset < offset + IMPORT_NAME_LENGTH_LIMIT and end_offset < eof:
+        if data[end_offset] == 0:
+            break
+        end_offset += 1
+    else:
+        msg = f'Original file contains invalid imports.\n' \
+              f'Maximum name length of {IMPORT_NAME_LENGTH_LIMIT} has been exceeded.\n' \
+              f'Start offset: {hex(offset)}.'
+        continue_or_exit_msg(msg)
+        return None
+    if get_bytes:
+        name = data[offset:end_offset]
+    else:
+        name = b''.join(bytes([b]) for b in data[offset:end_offset]).decode()
+    return name
+
+
+# get Relocation Table
+def get_relocs(data, e_lfanew, sections, pe_is_64):
+    if pe_is_64:
+        hdr_offset = e_lfanew + 176
+    else:
+        hdr_offset = e_lfanew + 160
+
+    reloc_rva = int.from_bytes(data[hdr_offset:hdr_offset + 4], 'little')
+    reloc_size = int.from_bytes(data[hdr_offset + 4:hdr_offset + 8], 'little')
+
+    if reloc_rva == 0 or reloc_size == 0:
+        message = 'Original file does not contain Relocation Table.'
+        print(f'{Back.CYAN}{message}{Back.RESET}')
+        Log.write(message)
+        return None
+
+    delta = get_offset_rva_delta(sections, reloc_rva)
+    reloc_offset = reloc_rva - delta
+    reloc_struct = data[reloc_offset:reloc_offset + reloc_size]
+
+    reloc_blocks = []
+    offset = 0
+    while offset < reloc_size:
+        block_rva = int.from_bytes(reloc_struct[offset:offset + 4], 'little')
+        block_size = int.from_bytes(reloc_struct[offset + 4:offset + 8], 'little')
+        block_delta = get_offset_rva_delta(sections, block_rva)
+        reloc_blocks.append(RelocBlock(block_rva, block_size, block_delta, reloc_struct[offset + 8:offset + block_size]))
+        offset += block_size
+
+    return RelocTable(hdr_offset=hdr_offset,
+                      struct_offset=reloc_offset,
+                      struct_size=reloc_size,
+                      blocks=reloc_blocks)
+
+
+# get functions from dll
+def get_dll_funcs(data, eof, sections, IAT_section, lib, pe_is_64, imagebase, va_list):
+    global NULL_DWORD, NULL_QWORD
+    if lib.oft_offset <= 0 and lib.ft_offset <= 0:
+        msg = f'Error parsing funcs in "{lib.name}" dll.\n' \
+              f'OFT offset: {lib.oft_offset}.\n' \
+              f'FT offset:  {lib.ft_offset}.'
+        continue_or_exit_msg(msg)
+        return None
+    if pe_is_64:
+        struct_sz = 8
+        struct_end = NULL_QWORD
+    else:
+        struct_sz = 4
+        struct_end = NULL_DWORD
+
+    func_offset = lib.ft_offset if lib.ft_offset > 0 else lib.oft_offset
+    func_rva = lib.ft_rva if lib.ft_rva > 0 else lib.oft_rva
+    func_va = func_rva + imagebase
+    functions = []
+    index = 0
+    while True:
+        func_struct = data[func_offset:func_offset + struct_sz]
+        if func_struct == struct_end:
+            break
+        is_ordinal = func_struct[-1] & 0b10000000 > 0  # check high bit
+        if is_ordinal:
+            functions.append(ImportFunc(index=index,
+                                        func_rva=func_rva,
+                                        func_va=func_va,
+                                        struct_offset=func_offset,
+                                        struct_size=struct_sz,
+                                        is_ordinal=is_ordinal,
+                                        ordinal=b''.join(bytes([b]) for b in func_struct),
+                                        name='ordinal'))
+        else:
+            hint_name_rva = int.from_bytes(func_struct, 'little')
+            hint_name_delta = get_offset_rva_delta(sections, hint_name_rva, IAT_section)
+            if hint_name_delta < 0:
+                msg = f'Error parsing functions in "{lib.name}" dll.'
+                continue_or_exit_msg(msg)
+                return None
+            hint_name_offset = hint_name_rva - hint_name_delta
+            hint = data[hint_name_offset:hint_name_offset + 2]
+            bname: bytes = get_import_name_from_offset(data, hint_name_offset + 2, eof, get_bytes=True)
+            if bname is None:
+                return None
+            name = bname.decode()
+            functions.append(ImportFunc(index=index,
+                                        func_rva=func_rva,
+                                        func_va=func_va,
+                                        struct_offset=func_offset,
+                                        struct_size=struct_sz,
+                                        hint_name_delta=hint_name_delta,
+                                        is_ordinal=is_ordinal,
+                                        hint_name_rva=hint_name_rva,
+                                        hint=b''.join(bytes([b]) for b in hint),
+                                        name=name,
+                                        bname=bname))
+        va_list.append(func_va)
+        func_rva += struct_sz
+        func_va += struct_sz
+        func_offset += struct_sz
+        index += 1
+    return functions
+
+
+def get_imports(data, e_lfanew, is_64, sections, eof, baseofcode, entrypoint, imagebase):
+    global IMPORT_DLL_STRUCT_SIZE, IMPORT_DLL_EMPTY_STRUCT
+    if is_64:
+        hdr_offset = e_lfanew + 144  # Import Table if PE32+: e_lfanew + 4 + 20 + 120
+    else:
+        hdr_offset = e_lfanew + 128  # Import Table if PE32: e_lfanew + 4 + 20 + 104
+
+    import_dir_rva = int.from_bytes(data[hdr_offset:hdr_offset + 4], 'little')
+    if import_dir_rva == 0:
+        msg = 'Original file does not contain imports.'
+        print(f'{Back.CYAN}{msg}{Back.RESET}')
+        Log.write(msg)
+        return None
+    IAT_section = None
+    for section in sections:
+        if section.vaddr <= import_dir_rva < section.vaddr + section.rsize:
+            IAT_section = section
+            break
+
+    if IAT_section is None:
+        msg = 'File contains invalid "IMAGE_DIRECTORY_ENTRY_IMPORT" VirtualAddress.'
+        continue_or_exit_msg(msg)
+        return None
+
+    dlls = []
+    va_list = []
+    dll_count = 0
+    func_count = 0
+    struct_offset = import_dir_rva - IAT_section.va_offset_delta
+    struct_size = int.from_bytes(data[hdr_offset + 4:hdr_offset + 8], 'little')
+    dll_offset = struct_offset
+    index = 0
+    while True:
+        dll_struct = data[dll_offset:dll_offset + IMPORT_DLL_STRUCT_SIZE]
+        if dll_struct == IMPORT_DLL_EMPTY_STRUCT:
+            break
+
+        oft_rva = int.from_bytes(dll_struct[0:4], 'little')
+        oft_delta = get_offset_rva_delta(sections, oft_rva, IAT_section)
+        ft_rva = int.from_bytes(dll_struct[16:20], 'little')
+        ft_delta = get_offset_rva_delta(sections, ft_rva, IAT_section)
+        lib_name_rva = int.from_bytes(dll_struct[12:16], 'little')
+        name_delta = get_offset_rva_delta(sections, lib_name_rva, IAT_section)
+        bname: bytes = get_import_name_from_offset(data, lib_name_rva - name_delta, eof, get_bytes=True)
+        if bname is None or not any([oft_rva, ft_rva]):
+            return None
+        name = bname.decode()
+        lib = ImportDll(index=index,
+                        struct_offset=dll_offset,
+                        oft_rva=oft_rva,
+                        oft_delta=oft_delta,
+                        timedatestamp=int.from_bytes(dll_struct[4:8], 'little'),
+                        forwarderchain=int.from_bytes(dll_struct[8:12], 'little'),
+                        name_rva=lib_name_rva,
+                        name_delta=name_delta,
+                        name=name,
+                        bname=bname,
+                        ft_rva=ft_rva,
+                        ft_delta=ft_delta)
+        if lib.ft_offset < eof and lib.oft_offset < eof:
+            lib.funcs = get_dll_funcs(data, eof, sections, IAT_section, lib, is_64, imagebase, va_list)
+            if lib.funcs is None:
+                return None
+            dlls.append(lib)
+        dll_count += 1
+        func_count += len(lib.funcs)
+        dll_offset += IMPORT_DLL_STRUCT_SIZE
+        index += 1
+    check_import_offsets(dlls)
+    imports = ImportDir(hdr_offset=hdr_offset,
+                        struct_offset=struct_offset,
+                        struct_size=struct_size,
+                        dlls=dlls,
+                        dll_count=dll_count,
+                        func_count=func_count,
+                        va_list=va_list)
+    collect_import_calls(data, imports, sections, baseofcode, entrypoint, imagebase, is_64)
+    return imports
+
+
+# get the lowest name offset
+def check_import_offsets(dlls):
+    global IMPORT_NAME_MIN_OFFSET, IMPORT_NAME_MAX_OFFSET, IMPORT_OFT_MIN_OFFSET, IMPORT_FT_MIN_OFFSET, IMPORT_OFT_DELTA, IMPORT_FT_DELTA
+    func_names = []
+    dll_padded_names = []
+    dll_not_padded_names = []
+    oft_sequence = []
+    ft_sequence = []
+    for dll in dlls:
+        if dll.oft_offset > 0:
+            oft_sequence += list(range(dll.oft_offset, dll.oft_offset + (dll.funcs[0].struct_size * (len(dll.funcs) + 1))))
+        if dll.ft_offset > 0:
+            ft_sequence += list(range(dll.ft_offset, dll.ft_offset + (dll.funcs[0].struct_size * (len(dll.funcs) + 1))))
+        dll_not_padded_names += list(range(dll.name_offset, dll.name_offset + dll.bname_size))
+        dll_padded_names += list(range(dll.name_offset, dll.name_offset + dll.bname_size_padded))
+        for func in dll.funcs:
+            if not func.is_ordinal:
+                func_names += list(range(func.hint_name_offset, func.hint_name_offset + func.hint_name_size))
+    # check dll and function names for sequential placement
+    name_sequence = dll_padded_names + func_names
+    name_sequence.sort()
+    for i in range(1, len(name_sequence)):
+        if name_sequence[i] != name_sequence[i-1] + 1:
+            name_ok = False
+            break
+    else:
+        name_ok = len(name_sequence) > 0
+    if not name_ok and len(name_sequence) > 0:
+        name_sequence = dll_not_padded_names + func_names
+        name_sequence.sort()
+        for i in range(1, len(name_sequence)):
+            if name_sequence[i] != name_sequence[i-1] + 1:
+                break
+        else:
+            name_ok = True
+    if name_ok:
+        IMPORT_NAME_MIN_OFFSET = name_sequence[0]
+        IMPORT_NAME_MAX_OFFSET = name_sequence[-1]
+    # check oft and ft structs for sequential placement
+    oft_sequence.sort()
+    for i in range(1, len(oft_sequence)):
+        if oft_sequence[i] != oft_sequence[i - 1] + 1:
+            oft_ok = False
+            break
+    else:
+        oft_ok = len(oft_sequence) > 0
+    ft_sequence.sort()
+    for i in range(1, len(ft_sequence)):
+        if ft_sequence[i] != ft_sequence[i - 1] + 1:
+            ft_ok = False
+            break
+    else:
+        ft_ok = len(ft_sequence) > 0
+    if oft_ok:
+        IMPORT_OFT_MIN_OFFSET = oft_sequence[0]
+        IMPORT_OFT_DELTA = dlls[0].oft_delta
+    if ft_ok:
+        IMPORT_FT_MIN_OFFSET = ft_sequence[0]
+        IMPORT_FT_DELTA = dlls[0].ft_delta
+
+
+def shuffle_names(sample_data, pe, imports):
+    global IMPORT_NAME_MIN_OFFSET, IMPORT_NAME_MAX_OFFSET
+    offset = IMPORT_NAME_MIN_OFFSET
+    max_offset = IMPORT_NAME_MAX_OFFSET
+    # check free space for names
+    while max_offset < pe.size and sample_data[max_offset] == 0:
+        max_offset += 1
+    # collect dll and function names into block
+    import_names_block = bytearray()
+    name_offset = offset
+    for dll in imports:
+        import_names_block += dll.bname + b'\x00'
+        dll.name_offset = name_offset
+        dll.name_rva = dll.name_delta + name_offset
+        name_offset += dll.name_len + 1
+        shuffle(dll.funcs)
+        for func in dll.funcs:
+            if not func.is_ordinal:
+                if name_offset % 2 > 0:
+                    import_names_block += b'\x00'
+                    name_offset += 1
+                # func name len + (hint sz + terminating zero) + pad
+                size = func.name_len + 3 + (name_offset - 1 + func.name_len) % 2
+                import_names_block += func.hint + func.bname + b'\x00' * (size - (func.name_len + 2))
+                func.hint_name_offset = name_offset
+                func.hint_name_rva = func.hint_name_delta + name_offset
+                name_offset += size
+    # check for out of bounds free space and set names
+    if offset + len(import_names_block) < max_offset:
+        sample_data = sample_data[:offset] + import_names_block + sample_data[offset + len(import_names_block):]
+    return sample_data
+
+
+def shuffle_imports(sample_data, pe, parts):
+    global IMPORT_DLL_EMPTY_STRUCT, IMPORT_NAME_MIN_OFFSET, IMPORT_OFT_MIN_OFFSET, IMPORT_FT_MIN_OFFSET, IMPORT_OFT_DELTA, IMPORT_FT_DELTA
+    dlls = copy.deepcopy(pe.imports.dlls)
+    parts['imp'] = f'Imports shuffled. Dll count: {pe.imports.dll_count}. Func count: {pe.imports.func_count}.'
+    shuffle(dlls)
+    if IMPORT_NAME_MIN_OFFSET > 0:
+        sample_data = shuffle_names(sample_data, pe, dlls)
+    oft_offset = IMPORT_OFT_MIN_OFFSET
+    ft_offset = IMPORT_FT_MIN_OFFSET
+    dll_block = bytearray()
+    for dll in dlls:
+        if IMPORT_NAME_MIN_OFFSET < 0:
+            shuffle(dll.funcs)  # if it is not possible to shuffle the names, shuffle the OFT/FT
+        # collect OFT/FT block
+        oft_ft_block = bytearray()
+        f_count = 0
+        for func in dll.funcs:
+            # store func rva to fix code section
+            if dll.oft_rva:
+                if oft_offset > 0:
+                    func.func_va = oft_offset + IMPORT_OFT_DELTA + (f_count * func.struct_size) + pe.imagebase
+                else:
+                    func.func_va = dll.oft_rva + (f_count * func.struct_size) + pe.imagebase
+            if dll.ft_rva:
+                if ft_offset > 0:
+                    func.func_va = ft_offset + IMPORT_FT_DELTA + (f_count * func.struct_size) + pe.imagebase
+                else:
+                    func.func_va = dll.ft_rva + (f_count * func.struct_size) + pe.imagebase
+            f_count += 1
+            if func.is_ordinal:
+                oft_ft_block += func.ordinal
+            else:
+                oft_ft_block += func.hint_name_rva.to_bytes(func.struct_size, 'little')
+        oft_ft_block += b'\x00' * dll.funcs[0].struct_size
+        # set OFT/FT
+        if dll.oft_offset:
+            if oft_offset > 0:
+                sample_data = sample_data[:oft_offset] + oft_ft_block + sample_data[oft_offset + len(oft_ft_block):]
+                dll.oft_offset = oft_offset
+                dll.oft_rva = oft_offset + dll.oft_delta
+                oft_offset += len(oft_ft_block)
+            else:
+                sample_data = sample_data[:dll.oft_offset] + oft_ft_block + sample_data[dll.oft_offset + len(oft_ft_block):]
+        if dll.ft_offset:
+            if ft_offset > 0:
+                sample_data = sample_data[:ft_offset] + oft_ft_block + sample_data[ft_offset + len(oft_ft_block):]
+                dll.ft_offset = ft_offset
+                dll.ft_rva = ft_offset + dll.ft_delta
+                ft_offset += len(oft_ft_block)
+            else:
+                sample_data = sample_data[:dll.ft_offset] + oft_ft_block + sample_data[dll.ft_offset + len(oft_ft_block):]
+        # collect dll structs
+        dll_block += dll.to_bytes()
+    dll_block += IMPORT_DLL_EMPTY_STRUCT
+    # set dll structs
+    sample_data = sample_data[:pe.imports.dlls[0].struct_offset] + dll_block + sample_data[pe.imports.dlls[0].struct_offset + len(dll_block):]
+    # fix func references
+    sample_data = fix_shuffled_funcs(sample_data, dlls)
+    return sample_data
+
+
+# fix references to shuffled functions
+def fix_shuffled_funcs(sample_data, dlls):
+    global IMPORT_CALLS
+    for dll in dlls:
+        for func in dll.funcs:
+            if func.func_rva in IMPORT_CALLS:
+                instructions = IMPORT_CALLS[func.func_rva]
+                for ins in instructions:
+                    if ins.is_absolute:
+                        operand_val = func.func_va
+                    else:
+                        operand_val = func.func_va - ins.address - ins.size
+                    fix_bytes = ins.bytes[:ins.operand_offset] + operand_val.to_bytes(ins.operand_size, 'little')
+                    sample_data = sample_data[:ins.offset] + fix_bytes + sample_data[ins.offset + ins.size:]
+    return sample_data
+
+
+# collect instructions with import calls
+def collect_import_calls(data, imports, sections, baseofcode, entrypoint, imagebase, pe_is_64):
+    global TARGET_INSTRUCTIONS, IMPORT_CALLS
+    # get code section
+    for section in sections:
+        if section.vaddr <= baseofcode < section.vaddr + section.rsize:
+            code_section = section
+            break
+    else:
+        for section in sections:
+            if section.vaddr <= entrypoint < section.vaddr + section.rsize:
+                code_section = section
+                break
+        else:
+            return
+    # set disassembler
+    if pe_is_64:
+        md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
+    else:
+        md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_32)
+    md.skipdata_setup = ("db", None, None)
+    md.skipdata = True
+    md.detail = True
+    # collect instructions
+    code_bytes = data[code_section.raddr:code_section.raddr + code_section.rsize]
+    for ins in md.disasm(code_bytes, imagebase + code_section.vaddr):
+        if ins.mnemonic in TARGET_INSTRUCTIONS:
+            if ins.mnemonic == 'mov':
+                # check second operand is memory
+                if ins.operands[1].type == capstone.x86.X86_OP_MEM:
+                    if pe_is_64:
+                        is_absolute = False
+                        operand_va = ins.disp + ins.address + ins.size
+                    else:
+                        is_absolute = True
+                        operand_va = ins.disp
+                else:
+                    is_absolute = False
+                    operand_va = 0
+            else:
+                if pe_is_64:
+                    is_absolute = False
+                    operand_va = ins.disp + ins.address + ins.size
+                # check instruction is 32 bit relative call/jmp
+                elif capstone.x86.X86_GRP_BRANCH_RELATIVE in ins.groups:
+                    is_absolute = False
+                    operand_va = ins.operands[0].imm
+                else:
+                    is_absolute = True
+                    operand_va = ins.disp
+            if operand_va == 0 or operand_va not in imports.va_list:
+                continue
+            # add fields to the instruction obj:
+            # "offset" indicates the offset of the instruction in the file
+            # "is_absolute" indicates the type of addressing
+            # "operand_va" indicates VirtualAddress of the operand
+            # "operand_offset" indicates the offset of the operand within the instruction
+            # "operand_size" indicates the size of the operand
+            ins.offset = ins.address - imagebase - code_section.vaddr + code_section.raddr
+            ins.is_absolute = is_absolute
+            ins.operand_va = operand_va
+            if ins.disp_offset > 0:
+                ins.operand_offset = ins.disp_offset
+                ins.operand_size = ins.disp_size
+            else:
+                ins.operand_offset = ins.imm_offset
+                ins.operand_size = ins.imm_size
+            func_rva = operand_va - imagebase
+            if func_rva in IMPORT_CALLS:
+                IMPORT_CALLS[func_rva].append(ins)
+            else:
+                IMPORT_CALLS[func_rva] = [ins]
+
+
 # set "-out" path without collisions
 def set_out_path(dst, pe_name):
     today = str(date.today())
@@ -1407,6 +2002,7 @@ def set_out_path(dst, pe_name):
 
 # check arguments
 def check_args(args):
+    global SYS_DRIVE
     # check "-in" file
     if not os.path.exists(args.in_file) or not os.path.isfile(args.in_file):
         exit_program(f'Can not access the "-in" file: {args.in_file}')
@@ -1434,9 +2030,14 @@ def check_args(args):
     # check search depth
     if args.depth < 0:
         exit_program(f'Invalid value for "-d": {args.d}.')
-
-    if args.no_rich and args.no_timePE and args.no_sign and args.no_vi and args.no_dbg:
+    # check excluded parts
+    if all([args.no_rich, args.no_timePE, args.no_sign, args.no_vi, args.no_dbg, args.no_res, args.no_imp, args.no_names]):
         exit_program('All attributes removed, nothing to search.', 0)
+    # check capstone module for "-imp" option
+    if args.imp and capstone is None:
+        message = 'Import shuffling ("-imp") option needs capstone module, which does not installed.\n' \
+                  'Use "pip install capstone" command to add module.'
+        exit_program(message)
     # collect warnings
     warnings = []
     if args.rich and args.no_rich:
@@ -1453,6 +2054,10 @@ def check_args(args):
         warnings.append(f'{Back.RED}"-no-dbg"{Back.RESET} \tcannot be used at the same time with {Back.GREEN}"-dbg"{Back.RESET}.')
     if args.res and args.no_res:
         warnings.append(f'{Back.RED}"-no-res"{Back.RESET} \tcannot be used at the same time with {Back.GREEN}"-res"{Back.RESET}.')
+    if args.imp and args.no_imp:
+        warnings.append(f'{Back.RED}"-no-imp"{Back.RESET} \tcannot be used at the same time with {Back.GREEN}"-imp"{Back.RESET}.')
+    if args.names and args.no_names:
+        warnings.append(f'{Back.RED}"-no-names"{Back.RESET} \tcannot be used at the same time with {Back.GREEN}"-names"{Back.RESET}.')
     # show warnings
     if warnings:
         print('The following incompatible switches were used:')
@@ -1466,17 +2071,24 @@ def check_args(args):
         args.ext = ('.exe', '.dll')
     # register SIGINT handler
     signal.signal(signal.SIGINT, signal_handler)
+    # check admin privileges if system drive is selected
+    if args.sd[0] == SYS_DRIVE[0]:
+        is_admin = ct.windll.shell32.IsUserAnAdmin() != 0
+        if not is_admin:
+            msg = 'System drive selected as "-sd" but no admin privileges granted,\n' \
+                  'which may result in fewer available donors.'
+            continue_or_exit_msg(msg)
 
 
 # set search options
 def set_options(args):
     # no options selected == all options selected
-    if all([args.rich, args.timePE, args.sign, args.vi, args.dbg, args.res, args.names]) \
-            or (not any([args.rich, args.timePE, args.sign, args.vi, args.dbg, args.res, args.names,
-                         args.no_rich, args.no_timePE, args.no_sign, args.no_vi, args.no_dbg, args.no_res, args.no_names])):
+    if all([args.rich, args.timePE, args.sign, args.vi, args.dbg, args.res, args.imp, args.names]) \
+            or (not any([args.rich, args.timePE, args.sign, args.vi, args.dbg, args.res, args.imp, args.names,
+                         args.no_rich, args.no_timePE, args.no_sign, args.no_vi, args.no_dbg, args.no_res, args.no_imp, args.no_names])):
         return
     # enable specified options
-    if any([args.rich, args.timePE, args.sign, args.vi, args.dbg, args.res]):
+    if any([args.rich, args.timePE, args.sign, args.vi, args.dbg, args.res, args.imp, args.names]):
         Options.disable_all()
         if args.rich:
             Options.search_rich = True
@@ -1490,6 +2102,8 @@ def set_options(args):
             Options.search_dbg = True
         if args.res:
             Options.search_res = True
+        if args.imp:
+            Options.shuffle_imp = True
         if args.names:
             Options.change_names = True
     else:  # disable specified options
@@ -1506,6 +2120,8 @@ def set_options(args):
             Options.search_dbg = False
         if args.no_res:
             Options.search_res = False
+        if args.no_imp:
+            Options.shuffle_imp = False
         if args.no_names:
             Options.change_names = False
     return
@@ -1526,7 +2142,7 @@ def check_64(data, e_lfanew, checking_original=False):
 
 # check original PE parts
 def check_original(args):
-    global SEPARATOR, CREATE_DEBUG_INFO_SESSION
+    global SEPARATOR, CREATE_DEBUG_INFO_SESSION, IMPORT_NAME_MIN_OFFSET, IMPORT_NAME_MAX_OFFSET
     with open(args.in_file, 'rb') as file:
         data = bytearray(file.read())
     pe_size = len(data)
@@ -1534,17 +2150,33 @@ def check_original(args):
     if e_lfanew == 0 or e_lfanew >= pe_size:
         exit_program(f'Original file contains invalid e_lfanew value: {hex(e_lfanew)}.')
     is_64 = check_64(data, e_lfanew, checking_original=True)
-
+    # get AddressOfEntryPoint
+    orig_entrypoint = int.from_bytes(data[e_lfanew + 40:e_lfanew + 44], 'little')
+    if orig_entrypoint == 0:
+        continue_or_exit_msg(f'Original file contains invalid AddressOfEntryPoint value: {orig_entrypoint}.')
+    # get BaseOfCode
+    orig_baseofcode = int.from_bytes(data[e_lfanew + 44:e_lfanew + 48], 'little')
+    if orig_baseofcode == 0:
+        continue_or_exit_msg(f'Original file contains invalid BaseOfCode value: {orig_baseofcode}.')
+    # get ImageBase
+    if is_64:
+        orig_imagebase = int.from_bytes(data[e_lfanew + 48:e_lfanew + 56], 'little')
+    else:
+        orig_imagebase = int.from_bytes(data[e_lfanew + 52:e_lfanew + 56], 'little')
+    if orig_imagebase % 64 > 0:
+        message = f'Original file contains invalid ImageBase value: {orig_imagebase}.\n' \
+                  f'ImageBase is not a power of 64.'
+        continue_or_exit_msg(message)
     orig_sections = get_sections(data, e_lfanew, pe_size, checking_original=True)
     sec_alignment = int.from_bytes(data[e_lfanew + 56:e_lfanew + 60], 'little')  # SectionAlignment offset = e_lfanew + 4 + 20 + 32
     fl_alignment = int.from_bytes(data[e_lfanew + 60:e_lfanew + 64], 'little')   # FileAlignment offset = e_lfanew + 4 + 20 + 36
     if fl_alignment % 2 > 0 or fl_alignment > 64000:
         message = f'Original file contains invalid FileAlignment: {fl_alignment}.\n' \
-                  f'FileAlignment is not power of 2 or greater than 64000 (0xFA00).'
+                  f'FileAlignment is not a power of 2 or greater than 64000 (0xFA00).'
         continue_or_exit_msg(message)
     if sec_alignment % 2 > 0:
         message = f'Original file contains invalid SectionAlignment: {sec_alignment}.\n' \
-                  f'SectionAlignment is not power of 2.'
+                  f'SectionAlignment is not a power of 2.'
         continue_or_exit_msg(message)
     if sec_alignment < fl_alignment:
         message = f'Original file contains invalid FileAlignment or SectionAlignment.\n' \
@@ -1566,6 +2198,14 @@ def check_original(args):
             Options.search_dbg = False
     else:
         orig_dbgs = None
+    # check original imports
+    if Options.shuffle_imp:
+        orig_imports = get_imports(data, e_lfanew, is_64, orig_sections, pe_size, orig_baseofcode, orig_entrypoint, orig_imagebase)
+        if orig_imports is None:
+            Options.shuffle_imp = False
+    else:
+        orig_imports = None
+
     # check original resources
     if any([Options.search_res, Options.search_vi, Options.search_dbg and args.store_dbg_to_rsrc]):
         orig_res = get_resources(data, e_lfanew, is_64, orig_sections, pe_size, checking_original=True)
@@ -1606,6 +2246,9 @@ def check_original(args):
     # collect received data
     return MimicPE(path_to_file=args.in_file,
                    e_lfanew=e_lfanew,
+                   baseofcode=orig_baseofcode,
+                   entrypoint=orig_entrypoint,
+                   imagebase=orig_imagebase,
                    is_64=is_64,
                    data=data,
                    size=pe_size,
@@ -1615,6 +2258,7 @@ def check_original(args):
                    sign=orig_sign,
                    dbgs=orig_dbgs,
                    res=orig_res,
+                   imports=orig_imports,
                    section_alignment=sec_alignment,
                    file_alignment=fl_alignment)
 
@@ -1633,11 +2277,14 @@ def get_donor(pe, donor_path, args):
     is_64 = check_64(data, e_lfanew)
     if is_64 is None:  # is_64 == None means donor is not valid PE, so go next
         return None
+    score = 0
     donor_sections = get_sections(data, e_lfanew, size)
     if donor_sections is None:
         return None
-
-    score = 0
+    if Options.change_names:
+        score += 1
+    if Options.shuffle_imp:
+        score += 1
     donor_rich = None
     if Options.search_rich:
         donor_rich = get_rich(data, e_lfanew)
@@ -1937,6 +2584,9 @@ def get_sample_data(pe, donor, args, parts):
     # transplant time stamp from donor
     if Options.search_stamp and donor.stamp:
         sample_data = set_stamp(sample_data, pe, donor, parts)
+    # shuffle imports
+    if Options.shuffle_imp:
+        sample_data = shuffle_imports(sample_data, pe, parts)
     # transplant debug info from donor
     if Options.search_dbg and donor.dbgs and not CREATE_DEBUG_INFO_SESSION:
         sample_data = set_dbg(sample_data, pe, donor, parts, args.store_dbg_to_rsrc)
@@ -1963,15 +2613,20 @@ def save_sample(sample_data, pe, donor, args, parts):
     global COUNTER, SEPARATOR
     COUNTER += 1
     args.limit -= 1
-    sample_name = f'{str(COUNTER)}_{pe.name}_{donor.name}-{"-".join(parts.keys())}{pe.ext}'
+    if Options.donor_needed():
+        sample_name = f'{str(COUNTER)}_{pe.name}_{donor.name}-{"-".join(parts.keys())}{pe.ext}'
+        sample_path = os.path.join(args.out_dir, sample_name)
+        parts['message'] = f'Donor : {donor.path}\nSample: {sample_path}'
+    else:
+        sample_name = f'{str(COUNTER)}_{pe.name}-{"-".join(parts.keys())}{pe.ext}'
+        sample_path = os.path.join(args.out_dir, sample_name)
+        parts['message'] = f'Sample: {sample_path}'
     Log.write(sample_name)
-    sample_path = os.path.join(args.out_dir, sample_name)
-    parts['message'] = f'Donor : {donor.path}\nSample: {sample_path}'
     Log.write(f'\n{"-" * 22}\n'.join([parts[k] for k in parts.keys()]))
     with open(sample_path, 'wb') as f:
         f.write(sample_data)
     print(sample_name)
-    if args.with_donor:
+    if args.with_donor and Options.donor_needed():
         donor_name = f'{str(COUNTER)}_{donor.name}{donor.ext}'
         donor_path = os.path.join(args.out_dir, donor_name)
         with open(donor_path, 'wb') as f:
@@ -2015,33 +2670,41 @@ def search_donors(pe, args):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='By default the script includes all attributes for search.')
+    parser = argparse.ArgumentParser(description='By default the script includes all attributes for search.', formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument('-in', dest='in_file', metavar='path/to/file', required=True, type=str, help='path to input file.')
     parser.add_argument('-out', dest='out_dir', metavar='path/to/dir', type=str, default=None, help='path to output dir. "-in" file path is default.')
-    parser.add_argument('-sd', metavar='search/dir/path', type=str, default=r'C:\Windows', help='path to directory to search. "C:\\Windows" is default.')
+    parser.add_argument('-sd', metavar='search/dir/path', type=str, default=f'{SYS_DRIVE}\\Windows',
+                        help=f'path to the donor or to the directory to search for a donor. "{SYS_DRIVE}\\Windows" is default.')
     parser.add_argument('-d', dest='depth', metavar='depth', type=int, default=5, help='directory search depth. 5 is default.')
     parser.add_argument('-limit', metavar='int', type=int, default=0, help='required number of samples to create. all found variants is default. ')
-    parser.add_argument('-approx', action='store_true', help='use of variants with incomplete match.')
-    parser.add_argument('-rich', action='store_true', help='adds Rich Header to the search.')
-    parser.add_argument('-no-rich-fix', dest='no_rich_fix', action='store_true', help='disable modifying Rich Header values.')
-    parser.add_argument('-no-rich', dest='no_rich', action='store_true', help='removes Rich Header from the search.')
-    parser.add_argument('-timePE', action='store_true', help='adds TimeDateStamp from File Header to the search.')
-    parser.add_argument('-no-timePE', dest='no_timePE', action='store_true', help='removes TimeDateStamp from the search.')
-    parser.add_argument('-sign', action='store_true', help='adds file sign to the search.')
-    parser.add_argument('-no-sign', dest='no_sign', action='store_true', help='removes file sign from the search.')
-    parser.add_argument('-vi', action='store_true', help='adds VersionInfo to the search.')
-    parser.add_argument('-no-vi', dest='no_vi', action='store_true', help='removes VersionInfo from the search.')
-    parser.add_argument('-res', action='store_true', help='adds resournces to the search.')
-    parser.add_argument('-no-res', dest='no_res', action='store_true', help='removes resournces from the search.')
-    parser.add_argument('-dbg', action='store_true', help='adds Debug Info to the search.')
-    parser.add_argument('-no-dbg', dest='no_dbg', action='store_true', help='removes Debug Info from the search.')
-    parser.add_argument('-names', action='store_true', help='change section names as in the donor.')
-    parser.add_argument('-no-names', dest='no_names', action='store_true', help='do not change section names.')
     parser.add_argument('-ext', metavar='.extension', action='append', default=None,
                         help='file extensions to process. multiple "-ext" supported. Default: ".exe" & ".dll".')
-    parser.add_argument('-no-dbg-rsrc', dest='store_dbg_to_rsrc', action='store_false', help='do not add Debug Info to the resources if it is missing or does not fit in size.')
+    parser.add_argument('-with-donor', dest='with_donor', action='store_true', help='create copy of the donor in the "-out" directory.')
+    parser.add_argument('-approx', action='store_true',
+                        help='use of variants with incomplete match.\n'
+                        '-------------------------------------------------------------------------------------')
+    parser.add_argument('-rich', action='store_true', help='add Rich Header to the search.')
+    parser.add_argument('-no-rich', dest='no_rich', action='store_true', help='remove Rich Header from the search.')
+    parser.add_argument('-timePE', action='store_true', help='add TimeDateStamp from File Header to the search.')
+    parser.add_argument('-no-timePE', dest='no_timePE', action='store_true', help='remove TimeDateStamp from the search.')
+    parser.add_argument('-sign', action='store_true', help='add file sign to the search.')
+    parser.add_argument('-no-sign', dest='no_sign', action='store_true', help='remove file sign from the search.')
+    parser.add_argument('-vi', action='store_true', help='add VersionInfo to the search.')
+    parser.add_argument('-no-vi', dest='no_vi', action='store_true', help='remove VersionInfo from the search.')
+    parser.add_argument('-res', action='store_true', help='add resournces to the search.')
+    parser.add_argument('-no-res', dest='no_res', action='store_true', help='remove resournces from the search.')
+    parser.add_argument('-dbg', action='store_true', help='add Debug Info to the search.')
+    parser.add_argument('-no-dbg', dest='no_dbg', action='store_true', help='remove Debug Info from the search.')
+    parser.add_argument('-imp', action='store_true', help='shuffle original PE imports.')
+    parser.add_argument('-no-imp', dest='no_imp', action='store_true', help='do not shuffle original PE imports.')
+    parser.add_argument('-names', action='store_true', help='change section names as in the donor.')
+    parser.add_argument('-no-names', dest='no_names', action='store_true',
+                        help='do not change section names.\n'
+                        '-------------------------------------------------------------------------------------')
+    parser.add_argument('-no-rich-fix', dest='no_rich_fix', action='store_true', help='disable modifying Rich Header values.')
+    parser.add_argument('-no-dbg-rsrc', dest='store_dbg_to_rsrc', action='store_false',
+                        help='do not add Debug Info to the resources if it is missing or does not fit in size.')
     parser.add_argument('-no-checksum', dest='upd_checksum', action='store_false', help='do not update the checksum.')
-    parser.add_argument('-with-donor', dest='with_donor', action='store_true', help='creates copy of donor in the "-out" directory.')
     initargs = parser.parse_args()
 
     init()                                                  # Colorama initialization
@@ -2050,4 +2713,5 @@ if __name__ == '__main__':
     Log.init(initargs)                                      # Log initialization
     original_pe = check_original(initargs)                  # check original file
     search_donors(original_pe, initargs)                    # search donors for original file
+    os.startfile(initargs.out_dir)                          # open sample directory in explorer
     exit_program(f'Files savad in: {initargs.out_dir}', 0)  # cleanup and exit
