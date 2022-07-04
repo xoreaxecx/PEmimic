@@ -1,10 +1,10 @@
 # PEmimic
-A python tool that allows you to mimic one executable file to another.
+A PE morphing tool that allows you to mimic one executable file to another.
   
   
 Installing dependencies:
 ```
-pip install colorama
+pip install colorama capstone
 ```
   
   
@@ -24,12 +24,68 @@ script to use its own function, rename or remove the dll files from the director
 
 ---
 
-Before:  
-![sample before](https://github.com/xoreaxecx/PEmimic/blob/main/sample_before.png)
+### Example  
+```
+python PEmimic.py -in "C:\tmp\hi_64.exe" -limit 1
+```  
+<details>
+  <summary>Spoiler results</summary>
 
-After:  
-![sample after](https://github.com/xoreaxecx/PEmimic/blob/main/sample_after.png)
-
+  Total before:  
+  ![sample before](https://github.com/xoreaxecx/PEmimic/blob/main/examples/pic_work_before.jpg)  
+  
+  Total after:  
+  ![sample after](https://github.com/xoreaxecx/PEmimic/blob/main/examples/pic_work_after.jpg)  
+  
+  ---
+  
+  Rich before:  
+  ![rich_before](https://github.com/xoreaxecx/PEmimic/blob/main/examples/pic_rich_before.jpg)  
+  
+  Rich after:  
+  ![rich_after](https://github.com/xoreaxecx/PEmimic/blob/main/examples/pic_rich_after.jpg)  
+  
+  ---
+  
+  Sign before:  
+  ![sign_before](https://github.com/xoreaxecx/PEmimic/blob/main/examples/pic_sign_before.jpg)  
+  
+  Sign after:  
+  ![sign_after](https://github.com/xoreaxecx/PEmimic/blob/main/examples/pic_sign_after.jpg)  
+  
+  ---
+  
+  VersionInfo before:  
+  ![vi_before](https://github.com/xoreaxecx/PEmimic/blob/main/examples/pic_vi_before.jpg)  
+  
+  VersionInfo after:  
+  ![vi_after](https://github.com/xoreaxecx/PEmimic/blob/main/examples/pic_vi_after.jpg)  
+  
+  ---
+  
+  Resources before:  
+  ![res_before](https://github.com/xoreaxecx/PEmimic/blob/main/examples/pic_res_before.jpg)  
+  
+  Resources after:  
+  ![res_after](https://github.com/xoreaxecx/PEmimic/blob/main/examples/pic_res_after.jpg)  
+  
+  ---
+  
+  DebugInfo before:  
+  ![dbg_before](https://github.com/xoreaxecx/PEmimic/blob/main/examples/pic_dbg_before.jpg)  
+  
+  DebugInfo after:  
+  ![dbg_after](https://github.com/xoreaxecx/PEmimic/blob/main/examples/pic_dbg_after.jpg)  
+  
+  ---
+  
+  Imports before:  
+  ![imp_before](https://github.com/xoreaxecx/PEmimic/blob/main/examples/pic_imp_before.jpg)  
+  
+  Imports after:  
+  ![imp_after](https://github.com/xoreaxecx/PEmimic/blob/main/examples/pic_imp_after.jpg)  
+  
+</details>
 ---
 
 Help:
@@ -45,29 +101,33 @@ optional arguments:
   -h, --help           show this help message and exit
   -in path/to/file     path to input file.
   -out path/to/dir     path to output dir. "-in" file path is default.
-  -sd search/dir/path  path to directory to search. "C:\Windows" is default.
+  -sd search/dir/path  path to the donor or to the directory to search for a donor. "C:\Windows" is default.
   -d depth             directory search depth. 5 is default.
   -limit int           required number of samples to create. all found variants is default.
+  -ext .extension      file extensions to process. multiple "-ext" supported. Default: ".exe" & ".dll".
+  -with-donor          create copy of the donor in the "-out" directory.
   -approx              use of variants with incomplete match.
-  -rich                adds Rich Header to the search.
-  -no-rich-fix         disable modifying Rich Header values.
-  -no-rich             removes Rich Header from the search.
-  -timePE              adds TimeDateStamp from File Header to the search.
-  -no-timePE           removes TimeDateStamp from the search.
-  -sign                adds file sign to the search.
-  -no-sign             removes file sign from the search.
-  -vi                  adds VersionInfo to the search.
-  -no-vi               removes VersionInfo from the search.
-  -res                 adds resournces to the search.
-  -no-res              removes resournces from the search.
-  -dbg                 adds Debug Info to the search.
-  -no-dbg              removes Debug Info from the search.
+                       -------------------------------------------------------------------------------------
+  -rich                add Rich Header to the search.
+  -no-rich             remove Rich Header from the search.
+  -timePE              add TimeDateStamp from File Header to the search.
+  -no-timePE           remove TimeDateStamp from the search.
+  -sign                add file sign to the search.
+  -no-sign             remove file sign from the search.
+  -vi                  add VersionInfo to the search.
+  -no-vi               remove VersionInfo from the search.
+  -res                 add resournces to the search.
+  -no-res              remove resournces from the search.
+  -dbg                 add Debug Info to the search.
+  -no-dbg              remove Debug Info from the search.
+  -imp                 shuffle original PE imports.
+  -no-imp              do not shuffle original PE imports.
   -names               change section names as in the donor.
   -no-names            do not change section names.
-  -ext .extension      file extensions to process. multiple "-ext" supported. Default: ".exe" & ".dll".
+                       -------------------------------------------------------------------------------------
+  -no-rich-fix         disable modifying Rich Header values.
   -no-dbg-rsrc         do not add Debug Info to the resources if it is missing or does not fit in size.
   -no-checksum         do not update the checksum.
-  -with-donor          creates copy of donor in the "-out" directory.
 ```
 
 ---
