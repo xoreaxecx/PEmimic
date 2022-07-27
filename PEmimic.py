@@ -48,7 +48,9 @@ SEPARATOR = f'{"=" * 80}'
 COUNTER = 0
 
 # ---   debug info    ---
+# indicates that original PE cannot contain DebugInfo outside the .rsrc section at all
 CREATE_DEBUG_INFO_SESSION = False
+# indicates that original PE cannot contain DebugInfo outside the .rsrc section from current donor
 CREATE_DEBUG_INFO_SAMPLE = False
 
 # ---    checksum     ---
@@ -58,9 +60,9 @@ CHECKSUM_32_DLL_NAME = 'checksum32.dll'
 CHECKSUM_64_DLL_NAME = 'checksum64.dll'
 
 # ---   rich consts   ---
-RICH_MARK = b'\x52\x69\x63\x68'  # 1751345490 == 0x68636952 == b'\x52\x69\x63\x68' == b'Rich'
-DANS_MARK_B = 1147235923         # 1147235923 == 0x44616e53 == b'\x44\x61\x6e\x53' == b'DanS' big endian
-DANS_MARK_L = 1399742788         # 1399742788 == 0x536e6144 == b'\x44\x61\x6e\x53' == b'DanS' little endian
+RICH_MARK = b'\x52\x69\x63\x68'  # 0x68636952 == b'\x52\x69\x63\x68' == b'Rich'
+DANS_MARK_B = 0x44616e53         # 0x44616e53 == b'\x44\x61\x6e\x53' == b'DanS' big endian
+DANS_MARK_L = 0x536e6144         # 0x536e6144 == b'\x44\x61\x6e\x53' == b'DanS' little endian
 RICH_START_OFFSET = 0x80
 RICH_MIN_SIZE = 40
 KNOWN_PRODUCT_IDS = {
@@ -327,6 +329,7 @@ IMPORT_CALLS = {}  # {func_offset : [instruction_objs]}
 
 # parts to search
 class Options:
+    remove_mode = False
     search_rich = True
     search_stamp = True
     search_sign = True
@@ -335,9 +338,15 @@ class Options:
     search_res = True
     shuffle_imp = True
     change_names = True
+    remove_rich = False
+    remove_stamp = False
+    remove_sign = False
+    remove_ovl = False
+    remove_vi = False
+    remove_dbg = False
 
     @staticmethod
-    def enable_all():
+    def enable_all_search():
         Options.search_rich = True
         Options.search_stamp = True
         Options.search_sign = True
@@ -348,7 +357,17 @@ class Options:
         Options.change_names = True
 
     @staticmethod
-    def disable_all():
+    def enable_all_remove():
+        Options.remove_mode = True
+        Options.remove_rich = True
+        Options.remove_stamp = True
+        Options.remove_sign = True
+        Options.remove_ovl = True
+        Options.remove_vi = True
+        Options.remove_dbg = True
+
+    @staticmethod
+    def disable_all_search():
         Options.search_rich = False
         Options.search_stamp = False
         Options.search_sign = False
@@ -359,12 +378,28 @@ class Options:
         Options.change_names = False
 
     @staticmethod
+    def disable_all_remove():
+        Options.remove_rich = False
+        Options.remove_stamp = False
+        Options.remove_sign = False
+        Options.remove_ovl = False
+        Options.remove_vi = False
+        Options.remove_dbg = False
+
+    @staticmethod
     def get_search_count():
-        return Options.search_rich + Options.search_stamp + Options.search_sign + Options.search_vi + Options.search_dbg + Options.search_res + Options.shuffle_imp + Options.change_names
+        return Options.search_rich + Options.search_stamp + Options.search_sign + Options.search_vi + \
+               Options.search_dbg + Options.search_res + Options.shuffle_imp + Options.change_names
+
+    @staticmethod
+    def get_remove_count():
+        return Options.remove_rich + Options.remove_stamp + Options.remove_sign + \
+               Options.remove_ovl + Options.remove_vi + Options.remove_dbg
 
     @staticmethod
     def donor_needed():
-        return any([Options.search_rich, Options.search_stamp, Options.search_sign, Options.search_vi, Options.search_dbg, Options.search_res, Options.change_names])
+        return any([Options.search_rich, Options.search_stamp, Options.search_sign, Options.search_vi,
+                    Options.search_dbg, Options.search_res, Options.change_names])
 
     @staticmethod
     def get_string_options():
@@ -385,6 +420,18 @@ class Options:
             options.append('imp')
         if Options.change_names:
             options.append('names')
+        if Options.remove_rich:
+            options.append('rem_rich')
+        if Options.remove_stamp:
+            options.append('rem_timePE')
+        if Options.remove_sign:
+            options.append('rem_sign')
+        if Options.remove_ovl:
+            options.append('rem_ovl')
+        if Options.remove_vi:
+            options.append('rem_vi')
+        if Options.remove_dbg:
+            options.append('rem_dbg')
         return '-'.join(options)
 
 
@@ -607,7 +654,9 @@ class MimicPart:
 
 # contains summary of PE parts for transplant
 class MimicPE:
-    def __init__(self, path_to_file, e_lfanew, is_64, data, size, sections, rich, stamp, sign, dbgs, res, baseofcode=0, entrypoint=0, imagebase=0, relocs=None, imports=None, section_alignment=None, file_alignment=None):
+    def __init__(self, path_to_file, e_lfanew, is_64, data, size, sections, rich,
+                 stamp, sign, dbgs, res, baseofcode=0, entrypoint=0, imagebase=0,
+                 overlay=None, relocs=None, imports=None, section_alignment=None, file_alignment=None):
         self.path = path_to_file
         self.name = os.path.splitext(os.path.split(path_to_file)[1])[0]
         self.ext = os.path.splitext(os.path.split(path_to_file)[1])[1]
@@ -622,6 +671,7 @@ class MimicPE:
         self.rich = rich
         self.stamp = stamp
         self.sign = sign
+        self.overlay = overlay
         self.dbgs = dbgs
         self.res = res
         self.relocs = relocs
@@ -1182,7 +1232,7 @@ def get_space_for_rich(data, e_lfanew):
 
 # get PE rich
 # if original PE does not contain rich header, then a search will be made for a space to place it
-def get_rich(data, e_lfanew, checking_original=False):
+def get_rich(data, e_lfanew, remove_mode=False, checking_original=False):
     global RICH_MARK, DANS_MARK_B, RICH_START_OFFSET, RICH_MIN_SIZE
     rich_tail_offset = 0
     rich_head_offset = 0
@@ -1213,10 +1263,11 @@ def get_rich(data, e_lfanew, checking_original=False):
             message = 'Original file does not contain Rich Header.'
             print(f'{Back.CYAN}{message}{Back.RESET}')
             Log.write(message)
-            rich_size = get_space_for_rich(data, e_lfanew)
-            if rich_size >= RICH_MIN_SIZE:
-                return MimicPart(struct_offset=RICH_START_OFFSET,
-                                 struct_size=rich_size)
+            if not remove_mode:
+                rich_size = get_space_for_rich(data, e_lfanew)
+                if rich_size >= RICH_MIN_SIZE:
+                    return MimicPart(struct_offset=RICH_START_OFFSET,
+                                     struct_size=rich_size)
         return None
 
 
@@ -1419,13 +1470,15 @@ def get_dbg(data, e_lfanew, is_64, sections, eof, checking_original=False, store
 
 
 # get time stamp
-def get_stamp(data, e_lfanew, checking_original=False):
+def get_stamp(data, e_lfanew, remove_mode=False, checking_original=False):
     tds_offset = e_lfanew + 8
     if data[tds_offset:tds_offset + 4] == b'\x00\x00\x00\x00':
         if checking_original:
             message = 'Original file contains NULL TimeDateStamp.'
             print(f'{Back.CYAN}{message}{Back.RESET}')
             Log.write(message)
+            if remove_mode:
+                return None
         else:
             return None
     return MimicPart(struct_offset=tds_offset,
@@ -1433,7 +1486,7 @@ def get_stamp(data, e_lfanew, checking_original=False):
 
 
 # get authenticode sign
-def get_sign(data, e_lfanew, is_64, eof, checking_original=False):
+def get_sign(data, e_lfanew, is_64, eof, remove_mode=False, checking_original=False):
     if is_64:
         hdr_offset = e_lfanew + 168  # Security Directory if PE32+: e_lfanew + 4 + 20 + 144
     else:
@@ -1455,6 +1508,8 @@ def get_sign(data, e_lfanew, is_64, eof, checking_original=False):
                       f'Sign offset: {hex(sign_offset)}.\n' \
                       f'Sign size:   {sign_size}.'
             continue_or_exit_msg(message)
+        if remove_mode:
+            return None
         return MimicPart(hdr_offset=hdr_offset,
                          hdr_size=8,
                          data_offset=eof,
@@ -1462,13 +1517,37 @@ def get_sign(data, e_lfanew, is_64, eof, checking_original=False):
     return None
 
 
+# get overlay
+def get_overlay(sign: MimicPart, data, sections, checking_original=False):
+    if sign is None:
+        last_offset = 0
+        for section in sections:
+            sec_end = section.raddr + section.rsize
+            if sec_end > last_offset:
+                last_offset = sec_end
+    else:
+        last_offset = sign.data_offset + sign.data_size
+    ovl_size = len(data) - last_offset
+    if ovl_size > 0:
+        return MimicPart(data_offset=last_offset,
+                         data_size=ovl_size)
+    else:
+        if checking_original:
+            message = f'Original file does not contain Overlay.'
+            print(f'{Back.CYAN}{message}{Back.RESET}')
+            Log.write(message)
+        return None
+
+
 # get versioninfo
 def get_vi(data, e_lfanew, is_64, sections):
     EOF = len(data)
     if is_64:
-        res_dir_vaddr = int.from_bytes(data[e_lfanew + 152:e_lfanew + 160], 'little')  # if PE32+: e_lfanew + 4 + 20(file header size) + 128(Resource Directory RVA offset)
+        # if PE32+: e_lfanew + 4 + 20(file header size) + 128(Resource Directory RVA offset)
+        res_dir_vaddr = int.from_bytes(data[e_lfanew + 152:e_lfanew + 160], 'little')
     else:
-        res_dir_vaddr = int.from_bytes(data[e_lfanew + 136:e_lfanew + 140], 'little')  # if PE32: e_lfanew + 4 + 20(file header size) + 112(Resource Directory RVA offset)
+        # if PE32: e_lfanew + 4 + 20(file header size) + 112(Resource Directory RVA offset)
+        res_dir_vaddr = int.from_bytes(data[e_lfanew + 136:e_lfanew + 140], 'little')
     if res_dir_vaddr <= 0:
         return None
 
@@ -1839,7 +1918,7 @@ def shuffle_names(sample_data, pe, imports):
 def shuffle_imports(sample_data, pe, parts):
     global IMPORT_DLL_EMPTY_STRUCT, IMPORT_NAME_MIN_OFFSET, IMPORT_OFT_MIN_OFFSET, IMPORT_FT_MIN_OFFSET, IMPORT_OFT_DELTA, IMPORT_FT_DELTA
     dlls = copy.deepcopy(pe.imports.dlls)
-    parts['imp'] = f'Imports shuffled. Dll count: {pe.imports.dll_count}. Func count: {pe.imports.func_count}.'
+    parts['imp'] = f'Imports shuffled -> dll count: {pe.imports.dll_count} -> func count: {pe.imports.func_count}.'
     shuffle(dlls)
     if IMPORT_NAME_MIN_OFFSET > 0:
         sample_data = shuffle_names(sample_data, pe, dlls)
@@ -2042,7 +2121,8 @@ def check_args(args):
     warnings = []
     if args.rich and args.no_rich:
         warnings.append(f'{Back.RED}"-no-rich"{Back.RESET} \tcannot be used at the same time with {Back.GREEN}"-rich"{Back.RESET}.')
-    if args.no_rich_fix and args.no_rich or (args.no_rich_fix and not args.rich and any([args.timePE, args.sign, args.vi, args.dbg, args.res])):
+    if args.no_rich_fix and args.no_rich or (args.no_rich_fix and not args.rich and
+                                             any([args.timePE, args.sign, args.vi, args.dbg, args.res, args.imp, args.names])):
         warnings.append(f'{Back.RED}"-no-rich-fix"{Back.RESET} \tcannot be used without {Back.GREEN}"-rich"{Back.RESET}.')
     if args.timePE and args.no_timePE:
         warnings.append(f'{Back.RED}"-no-timePE"{Back.RESET} \tcannot be used at the same time with {Back.GREEN}"-timePE"{Back.RESET}.')
@@ -2052,12 +2132,22 @@ def check_args(args):
         warnings.append(f'{Back.RED}"-no-vi"{Back.RESET} \tcannot be used at the same time with {Back.GREEN}"-vi"{Back.RESET}.')
     if args.dbg and args.no_dbg:
         warnings.append(f'{Back.RED}"-no-dbg"{Back.RESET} \tcannot be used at the same time with {Back.GREEN}"-dbg"{Back.RESET}.')
+    if not args.store_dbg_to_rsrc and args.no_dbg or (args.store_dbg_to_rsrc and not args.dbg and
+                                                      any([args.rich, args.timePE, args.sign, args.vi, args.res, args.imp, args.names])):
+        warnings.append(f'{Back.RED}"-no-dbg-rsrc"{Back.RESET} \tcannot be used without {Back.GREEN}"-dbg"{Back.RESET}.')
     if args.res and args.no_res:
         warnings.append(f'{Back.RED}"-no-res"{Back.RESET} \tcannot be used at the same time with {Back.GREEN}"-res"{Back.RESET}.')
     if args.imp and args.no_imp:
         warnings.append(f'{Back.RED}"-no-imp"{Back.RESET} \tcannot be used at the same time with {Back.GREEN}"-imp"{Back.RESET}.')
     if args.names and args.no_names:
         warnings.append(f'{Back.RED}"-no-names"{Back.RESET} \tcannot be used at the same time with {Back.GREEN}"-names"{Back.RESET}.')
+    if any([args.rich, args.timePE, args.sign, args.vi, args.dbg, args.res, args.imp, args.names]) and \
+            any([args.clear, args.remove_rich, args.remove_timePE, args.remove_sign, args.remove_overlay, args.remove_vi, args.remove_dbg]):
+        warnings.append(f'{Back.RED}"-rem-*"{Back.RESET} commands (such as {Back.RED}"-rem-rich"{Back.RESET}) '
+                        f'cannot be used at the same time with search commands (such as {Back.GREEN}"-rich"{Back.RESET}).')
+        warnings.append('It is necessary to split process into two steps:')
+        warnings.append(f'\t1. Remove parts with {Back.RED}"-rem-*"{Back.RESET} commands.')
+        warnings.append('\t2. Search for new parts for the resulting sample.')
     # show warnings
     if warnings:
         print('The following incompatible switches were used:')
@@ -2082,14 +2172,34 @@ def check_args(args):
 
 # set search options
 def set_options(args):
-    # no options selected == all options selected
+    if args.clear:
+        Options.disable_all_search()
+        Options.enable_all_remove()
+        return
+    if any([args.remove_rich, args.remove_timePE, args.remove_sign, args.remove_overlay, args.remove_vi, args.remove_dbg]):
+        Options.disable_all_search()
+        Options.remove_mode = True
+        if args.remove_rich:
+            Options.remove_rich = True
+        if args.remove_timePE:
+            Options.remove_stamp = True
+        if args.remove_sign:
+            Options.remove_sign = True
+        if args.remove_overlay:
+            Options.remove_ovl = True
+        if args.remove_vi:
+            Options.remove_vi = True
+        if args.remove_dbg:
+            Options.remove_dbg = True
+        return
+    # no options selected == all search options selected
     if all([args.rich, args.timePE, args.sign, args.vi, args.dbg, args.res, args.imp, args.names]) \
             or (not any([args.rich, args.timePE, args.sign, args.vi, args.dbg, args.res, args.imp, args.names,
                          args.no_rich, args.no_timePE, args.no_sign, args.no_vi, args.no_dbg, args.no_res, args.no_imp, args.no_names])):
         return
     # enable specified options
     if any([args.rich, args.timePE, args.sign, args.vi, args.dbg, args.res, args.imp, args.names]):
-        Options.disable_all()
+        Options.disable_all_search()
         if args.rich:
             Options.search_rich = True
         if args.timePE:
@@ -2107,7 +2217,7 @@ def set_options(args):
         if args.names:
             Options.change_names = True
     else:  # disable specified options
-        Options.enable_all()
+        Options.enable_all_search()
         if args.no_rich:
             Options.search_rich = False
         if args.no_timePE:
@@ -2185,17 +2295,20 @@ def check_original(args):
                   f'SectionAlignment must be greater than FileAlignment'
         continue_or_exit_msg(message)
     # check original rich
-    if Options.search_rich:
-        orig_rich = get_rich(data, e_lfanew, checking_original=True)
+    if Options.search_rich or Options.remove_rich:
+        orig_rich = get_rich(data, e_lfanew, remove_mode=Options.remove_mode, checking_original=True)
         if orig_rich is None:
             Options.search_rich = False
+            Options.remove_rich = False
     else:
         orig_rich = None
     # check original debug info
-    if Options.search_dbg:
-        orig_dbgs = get_dbg(data, e_lfanew, is_64, orig_sections, pe_size, checking_original=True, store_to_rsrc=args.store_dbg_to_rsrc)
+    if Options.search_dbg or Options.remove_dbg:
+        orig_dbgs = get_dbg(data, e_lfanew, is_64, orig_sections, pe_size, checking_original=True,
+                            store_to_rsrc=(args.store_dbg_to_rsrc and not Options.remove_mode))
         if orig_dbgs is None:
             Options.search_dbg = False
+            Options.remove_dbg = False
     else:
         orig_dbgs = None
     # check original imports
@@ -2207,11 +2320,13 @@ def check_original(args):
         orig_imports = None
 
     # check original resources
-    if any([Options.search_res, Options.search_vi, Options.search_dbg and args.store_dbg_to_rsrc]):
+    if any([Options.search_res, Options.search_vi, Options.remove_vi, Options.search_dbg and args.store_dbg_to_rsrc]):
         orig_res = get_resources(data, e_lfanew, is_64, orig_sections, pe_size, checking_original=True)
         if orig_res is None:
             if Options.search_res:
                 Options.search_res = False
+            if Options.remove_vi:
+                Options.remove_vi = False
             if Options.search_vi:
                 Options.search_vi = False
                 message = 'Due to lack of resource section, can not append VersionInfo.'
@@ -2223,25 +2338,42 @@ def check_original(args):
                 print(f'{Back.CYAN}{message}{Back.RESET}')
                 Log.write(message)
         else:
-            if Options.search_vi and orig_res.vi is None:
+            if (Options.search_vi or Options.remove_vi) and orig_res.vi is None:
+                if Options.remove_vi:
+                    Options.remove_vi = False
                 message = 'Original file does not contain VersionInfo.'
                 print(f'{Back.CYAN}{message}{Back.RESET}')
                 Log.write(message)
     else:
         orig_res = None
-    # check if there are search options left
-    if Options.get_search_count() == 0:
-        exit_program('Nothing to search.', 0)
     # check original time stamp
-    if Options.search_stamp:
-        orig_stamp = get_stamp(data, e_lfanew, checking_original=True)
+    if Options.search_stamp or Options.remove_stamp:
+        orig_stamp = get_stamp(data, e_lfanew, remove_mode=Options.remove_mode, checking_original=True)
+        if orig_stamp is None and Options.remove_stamp:
+            Options.remove_stamp = False
     else:
         orig_stamp = None
     # check original authenticode sign
-    if Options.search_sign:
-        orig_sign = get_sign(data, e_lfanew, is_64, pe_size, checking_original=True)
+    if Options.search_sign or Options.remove_sign or Options.remove_ovl:
+        orig_sign = get_sign(data, e_lfanew, is_64, pe_size, remove_mode=Options.remove_mode, checking_original=True)
+        if orig_sign is None and Options.remove_sign:
+            Options.remove_sign = False
     else:
         orig_sign = None
+    # check overlay if remove mode enabled
+    if Options.remove_ovl:
+        orig_overlay = get_overlay(orig_sign, data, orig_sections, checking_original=True)
+        if orig_overlay is None:
+            Options.remove_ovl = False
+    else:
+        orig_overlay = None
+    # check if there are search or remove options left
+    if Options.get_search_count() == 0 and Options.get_remove_count() == 0:
+        if Options.remove_mode:
+            msg = 'Nothing to remove.'
+        else:
+            msg = 'Nothing to search.'
+        exit_program(msg, 0)
     Log.write(SEPARATOR)
     # collect received data
     return MimicPE(path_to_file=args.in_file,
@@ -2256,11 +2388,100 @@ def check_original(args):
                    rich=orig_rich,
                    stamp=orig_stamp,
                    sign=orig_sign,
+                   overlay=orig_overlay,
                    dbgs=orig_dbgs,
                    res=orig_res,
                    imports=orig_imports,
                    section_alignment=sec_alignment,
                    file_alignment=fl_alignment)
+
+
+# remove rich
+def remove_rich(pe, parts):
+    pe.data = pe.data[:pe.rich.struct_offset] + \
+              b'\x00' * pe.rich.struct_size + \
+              pe.data[pe.rich.struct_offset + pe.rich.struct_size:]
+    parts['rem_rich'] = f'Rich removed -> size: {pe.rich.struct_size} bytes.'
+
+
+# remove PE time date stamp
+def remove_stamp(pe, parts):
+    pe.data = pe.data[:pe.stamp.struct_offset] + \
+              b'\x00' * pe.stamp.struct_size + \
+              pe.data[pe.stamp.struct_offset + pe.stamp.struct_size:]
+    parts['rem_timePE'] = 'PE time stamp removed.'
+
+
+# remove DebugInfo
+def remove_dbg(pe, parts):
+    pe.data = clear_dbg(pe.data, pe.dbgs)
+    parts[f'rem_dbg'] = f'Debug info removed -> count: {len(pe.dbgs)}.'
+
+
+# remove Authenticode Sign
+def remove_sign(pe, last_offset, parts):
+    # clear header
+    pe.data = pe.data[:pe.sign.hdr_offset] + \
+              b'\x00' * pe.sign.hdr_size + \
+              pe.data[pe.sign.hdr_offset + pe.sign.hdr_size:]
+    # clear data
+    if last_offset > 0 and last_offset != pe.sign.data_offset:
+        pe.sign.data_offset = last_offset
+    pe.data = pe.data[:pe.sign.data_offset] + pe.data[pe.sign.data_offset + pe.sign.data_size:]
+    parts['rem_sign'] = f'Sign removed -> size: {pe.sign.data_size} bytes.'
+
+
+# fix Authenticode Sign header when section size is changed
+def fix_sign(pe, last_offset):
+    # get Security Directory offset
+    if pe.is_64:
+        hdr_offset = pe.e_lfanew + 168
+    else:
+        hdr_offset = pe.e_lfanew + 152
+    sign_offset = int.from_bytes(pe.data[hdr_offset:hdr_offset + 4], 'little')
+    # set new sign offset
+    if sign_offset > 0:
+        pe.data = pe.data[:hdr_offset] + last_offset.to_bytes(4, 'little') + pe.data[hdr_offset + 4:]
+
+
+# remove overlay
+def remove_overlay(pe, last_offset, parts):
+    if last_offset > 0 and last_offset != pe.overlay.data_offset:
+        pe.overlay.data_offset = last_offset
+    pe.data = pe.data[:pe.overlay.data_offset]
+    parts['rem_ovl'] = f'Overlay removed -> size: {pe.overlay.data_size} bytes.'
+
+
+# remove VersionInfo
+# returns last offset of the last section
+def remove_vi(pe, parts):
+    pe.res.vi = None
+    pe.res.id_entries_count -= 1
+    res_result = set_resources(pe.data, pe, pe, parts, search_res=False, search_vi=False, remove_mode=True)
+    pe.data = res_result[0]
+    parts['rem_vi'] = f'VersionInfo removed.'
+    return res_result[1]
+
+
+# remove specified parts
+def clear_original(pe, args):
+    parts = {}
+    last_offset = 0
+    if Options.remove_rich:
+        remove_rich(pe, parts)
+    if Options.remove_stamp:
+        remove_stamp(pe, parts)
+    if Options.remove_dbg:
+        remove_dbg(pe, parts)
+    if Options.remove_vi:
+        last_offset = remove_vi(pe, parts)
+        if not Options.remove_sign:
+            fix_sign(pe, last_offset)
+    if Options.remove_sign:
+        remove_sign(pe, last_offset, parts)
+    if Options.remove_ovl:
+        remove_overlay(pe, last_offset, parts)
+    save_sample(pe.data, pe, pe, args, parts)
 
 
 # check PE for transplant parts
@@ -2435,10 +2656,10 @@ def set_dbg(sample_data, pe, donor, parts, dbg_to_rsrc):
 
 # add donor resources to sample
 # returns tuple(sample_data, end_of_rsrc_data)
-def set_resources(sample_data, pe, donor, parts):
+def set_resources(sample_data, pe, donor, parts, search_res, search_vi, remove_mode=False):
     global CREATE_DEBUG_INFO_SESSION, CREATE_DEBUG_INFO_SAMPLE
-    if donor.res:
-        merged_res = merge_resources(pe.res, donor.res, Options.search_vi, Options.search_res)
+    if not remove_mode and donor.res:
+        merged_res = merge_resources(pe.res, donor.res, search_vi, search_res)
         flat_resources = get_flat_resources(merged_res)
     else:
         flat_resources = get_flat_resources(pe.res)
@@ -2450,7 +2671,7 @@ def set_resources(sample_data, pe, donor, parts):
             rsrc_name_entries += b'\x00'
             flat_resources.last_indent += 1
         rsrc_name_entries += ne[1]
-        ne[0].name_id = flat_resources.last_indent + 2147483648  # 2147483648 is 80000000 to set high bit
+        ne[0].name_id = flat_resources.last_indent + 0x80000000  # set high bit
         flat_resources.last_indent += len(ne[1])
 
     rsrc_section = None
@@ -2542,9 +2763,9 @@ def set_resources(sample_data, pe, donor, parts):
         # change SizeOfImage
         sample_data = sample_data[:pe.e_lfanew + 80] + size_of_image.to_bytes(4, 'little') + sample_data[pe.e_lfanew + 84:]
 
-    if Options.search_res:
+    if search_res:
         parts['res'] = f'Resources -> prev size: {rsrc_section.rsize} bytes -> new size: {rsrc_rsz} bytes.'
-    if Options.search_vi and donor.res.vi is not None:
+    if search_vi and donor.res.vi is not None:
         if pe.res.vi is None:
             parts['vi'] = f'VersionInfo added.'
         else:
@@ -2593,7 +2814,7 @@ def get_sample_data(pe, donor, args, parts):
     sample_end_of_data = 0
     # transplant resources from donor
     if ((Options.search_res or Options.search_vi) and donor.res) or ((CREATE_DEBUG_INFO_SESSION or CREATE_DEBUG_INFO_SAMPLE) and pe.res):
-        resource_result = set_resources(sample_data, pe, donor, parts)
+        resource_result = set_resources(sample_data, pe, donor, parts, Options.search_res, Options.search_vi)
         sample_data = resource_result[0]
         sample_end_of_data = resource_result[1]
     # transplant authenticode sign from donor
@@ -2685,22 +2906,29 @@ if __name__ == '__main__':
                         '-------------------------------------------------------------------------------------')
     parser.add_argument('-rich', action='store_true', help='add Rich Header to the search.')
     parser.add_argument('-no-rich', dest='no_rich', action='store_true', help='remove Rich Header from the search.')
+    parser.add_argument('-rem-rich', dest='remove_rich', action='store_true', help='remove Rich Header from the original file.')
     parser.add_argument('-timePE', action='store_true', help='add TimeDateStamp from File Header to the search.')
     parser.add_argument('-no-timePE', dest='no_timePE', action='store_true', help='remove TimeDateStamp from the search.')
+    parser.add_argument('-rem-timePE', dest='remove_timePE', action='store_true', help='remove TimeDateStamp from the original file.')
     parser.add_argument('-sign', action='store_true', help='add file sign to the search.')
     parser.add_argument('-no-sign', dest='no_sign', action='store_true', help='remove file sign from the search.')
+    parser.add_argument('-rem-sign', dest='remove_sign', action='store_true', help='remove file sign from the original file.')
+    parser.add_argument('-rem-ovl', dest='remove_overlay', action='store_true', help='remove overlay from the original file.')
     parser.add_argument('-vi', action='store_true', help='add VersionInfo to the search.')
     parser.add_argument('-no-vi', dest='no_vi', action='store_true', help='remove VersionInfo from the search.')
+    parser.add_argument('-rem-vi', dest='remove_vi', action='store_true', help='remove VersionInfo from the original file.')
     parser.add_argument('-res', action='store_true', help='add resournces to the search.')
     parser.add_argument('-no-res', dest='no_res', action='store_true', help='remove resournces from the search.')
     parser.add_argument('-dbg', action='store_true', help='add Debug Info to the search.')
     parser.add_argument('-no-dbg', dest='no_dbg', action='store_true', help='remove Debug Info from the search.')
+    parser.add_argument('-rem-dbg', dest='remove_dbg', action='store_true', help='remove Debug Info from the original file.')
     parser.add_argument('-imp', action='store_true', help='shuffle original PE imports.')
     parser.add_argument('-no-imp', dest='no_imp', action='store_true', help='do not shuffle original PE imports.')
     parser.add_argument('-names', action='store_true', help='change section names as in the donor.')
     parser.add_argument('-no-names', dest='no_names', action='store_true',
                         help='do not change section names.\n'
                         '-------------------------------------------------------------------------------------')
+    parser.add_argument('-clear', action='store_true', help='combines all "-rem-*" commands into one.')
     parser.add_argument('-no-rich-fix', dest='no_rich_fix', action='store_true', help='disable modifying Rich Header values.')
     parser.add_argument('-no-dbg-rsrc', dest='store_dbg_to_rsrc', action='store_false',
                         help='do not add Debug Info to the resources if it is missing or does not fit in size.')
@@ -2712,6 +2940,9 @@ if __name__ == '__main__':
     set_options(initargs)                                   # set options for search
     Log.init(initargs)                                      # Log initialization
     original_pe = check_original(initargs)                  # check original file
-    search_donors(original_pe, initargs)                    # search donors for original file
+    if Options.remove_mode:
+        clear_original(original_pe, initargs)               # remove specified parts
+    else:
+        search_donors(original_pe, initargs)                # search donors for original file
     os.startfile(initargs.out_dir)                          # open sample directory in explorer
     exit_program(f'Files savad in: {initargs.out_dir}', 0)  # cleanup and exit
