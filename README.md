@@ -111,21 +111,28 @@ optional arguments:
                        -------------------------------------------------------------------------------------
   -rich                add Rich Header to the search.
   -no-rich             remove Rich Header from the search.
+  -rem-rich            remove Rich Header from the original file.
   -timePE              add TimeDateStamp from File Header to the search.
   -no-timePE           remove TimeDateStamp from the search.
+  -rem-timePE          remove TimeDateStamp from the original file.
   -sign                add file sign to the search.
   -no-sign             remove file sign from the search.
+  -rem-sign            remove file sign from the original file.
+  -rem-ovl             remove overlay from the original file.
   -vi                  add VersionInfo to the search.
   -no-vi               remove VersionInfo from the search.
+  -rem-vi              remove VersionInfo from the original file.
   -res                 add resournces to the search.
   -no-res              remove resournces from the search.
   -dbg                 add Debug Info to the search.
   -no-dbg              remove Debug Info from the search.
+  -rem-dbg             remove Debug Info from the original file.
   -imp                 shuffle original PE imports.
   -no-imp              do not shuffle original PE imports.
   -names               change section names as in the donor.
   -no-names            do not change section names.
                        -------------------------------------------------------------------------------------
+  -clear               combines all "-rem-*" commands into one.
   -no-rich-fix         disable modifying Rich Header values.
   -no-dbg-rsrc         do not add Debug Info to the resources if it is missing or does not fit in size.
   -no-checksum         do not update the checksum.
