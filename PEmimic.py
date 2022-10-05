@@ -2132,7 +2132,7 @@ def check_args(args):
         warnings.append(f'{Back.RED}"-no-vi"{Back.RESET} \tcannot be used at the same time with {Back.GREEN}"-vi"{Back.RESET}.')
     if args.dbg and args.no_dbg:
         warnings.append(f'{Back.RED}"-no-dbg"{Back.RESET} \tcannot be used at the same time with {Back.GREEN}"-dbg"{Back.RESET}.')
-    if not args.store_dbg_to_rsrc and args.no_dbg or (args.store_dbg_to_rsrc and not args.dbg and
+    if not args.store_dbg_to_rsrc and args.no_dbg or (not args.store_dbg_to_rsrc and not args.dbg and
                                                       any([args.rich, args.timePE, args.sign, args.vi, args.res, args.imp, args.names])):
         warnings.append(f'{Back.RED}"-no-dbg-rsrc"{Back.RESET} \tcannot be used without {Back.GREEN}"-dbg"{Back.RESET}.')
     if args.res and args.no_res:
