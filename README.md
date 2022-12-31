@@ -25,6 +25,7 @@ script to use its own function, rename or remove the dll files from the director
 ---
 
 ### Example  
+Replace or add all possible parts of the input file, shuffle its imports, fix the new Rich header and update the checksum. Get one sample output.  
 ```
 python PEmimic.py -in "C:\tmp\hi_64.exe" -limit 1
 ```  
@@ -136,6 +137,27 @@ optional arguments:
   -no-rich-fix         disable modifying Rich Header values.
   -no-dbg-rsrc         do not add Debug Info to the resources if it is missing or does not fit in size.
   -no-checksum         do not update the checksum.
+```
+
+---
+
+### Other examples:  
+  
+Replace or add only the authenticode signature without updating the checksum. Get one sample to the "C:\output" directory.  
+```
+python PEmimic.py -in "C:\tmp\hi_64.exe" -out "C:\output" -sign -no-checksum -limit 1  
+```
+Replace or add only the Rich header from all possible donors from the "C:\donors" directory without fixing it. Update sample checksum.  
+```
+python PEmimic.py -in "C:\tmp\hi_64.exe" -sd "C:\donors" -rich -no-rich-fix  
+```
+Remove the version information, update the checksum and place in the "C:\cleared" directory.  
+```
+python PEmimic.py -in "C:\tmp\hi_64.exe" -out "C:\cleared" -rem-vi  
+```
+Remove Rich header, PE TimeDateStamp, authenticode signature, overlay, version information, debug information, update checksum and place in "C:\cleared" directory.  
+```
+python PEmimic.py -in "C:\tmp\hi_64.exe" -out "C:\cleared" -clear  
 ```
 
 ---
