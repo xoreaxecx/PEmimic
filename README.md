@@ -92,9 +92,13 @@ python PEmimic.py -in "C:\tmp\hi_64.exe" -limit 1
 
 ### Other examples:  
   
-Replace or add only the authenticode signature without updating the checksum. Get one sample to the "C:\output" directory.  
+Replace or add the authenticode signature and Rich header without updating the checksum. Get one sample to the "C:\output" directory.  
 ```
-python PEmimic.py -in "C:\tmp\hi_64.exe" -out "C:\output" -sign -no-checksum -limit 1  
+python PEmimic.py -in "C:\tmp\hi_64.exe" -out "C:\output" -rich -sign -no-checksum -limit 1  
+```
+Replace or add all possible parts of the input file except version information, shuffle its imports, fix the new Rich header and update the checksum. Get one sample output.  
+```
+python PEmimic.py -in "C:\tmp\hi_64.exe" -no-vi -limit 1  
 ```
 Replace or add only the Rich header from all possible donors from the "C:\donors" directory without fixing it. Update sample checksum.  
 ```
