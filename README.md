@@ -7,9 +7,8 @@ Installing dependencies:
 pip install colorama capstone
 ```
   
-  
+---  
 ### Principle of operation:
----
 
 * takes an executable file as input and analyzes it;
 * identifies parts of the input file (rich header, sign, resources, etc);
