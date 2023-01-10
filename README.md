@@ -1,12 +1,10 @@
 # PEmimic
 A PE morphing tool that allows you to mimic one executable file to another.
-  
-  
-Installing dependencies:
+---  
+### Installing dependencies:
 ```
 pip install colorama capstone
 ```
-  
 ---  
 ### Principle of operation:
 
