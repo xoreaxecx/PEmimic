@@ -1,24 +1,27 @@
 # PEmimic
-A PE morphing tool that allows you to mimic one executable file to another.
+A PE morphing tool that allows you to mimic one executable file to another.  
+
 ---  
-### Installing dependencies:
+  
+### Installing dependencies:  
 ```
 pip install colorama capstone
 ```
 ---  
-### Principle of operation:
+
+### Principle of operation:  
 
 * takes an executable file as input and analyzes it;
 * identifies parts of the input file (rich header, sign, resources, etc);
 * searches and analyzes files in the specified directory;
 * transplants parts of the parsed files into the input file.
-
+  
 ---
-
+  
 Due to the low speed of calculating the checksum in python, two versions of the [checksum library](https://github.com/xoreaxecx/ChecksumDll)  
 are included in the project (for [32 bit](https://github.com/xoreaxecx/PEmimic/blob/main/checksum32.dll) and [64 bit](https://github.com/xoreaxecx/PEmimic/blob/main/checksum64.dll) python interpreter). To force the  
 script to use its own function, rename or remove the dll files from the directory.  
-
+  
 ---
 
 ### Example  
