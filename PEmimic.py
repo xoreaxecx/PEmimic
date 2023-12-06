@@ -58,6 +58,7 @@ USE_CHECKSUM_DLL = None
 DLL_CHECKSUM_FUNC = None
 CHECKSUM_32_DLL_NAME = 'checksum32.dll'
 CHECKSUM_64_DLL_NAME = 'checksum64.dll'
+INTERPRETER_IS_64 = sys.maxsize > 2 ** 32
 
 # ---   rich consts   ---
 RICH_MARK = b'\x52\x69\x63\x68'  # 0x68636952 == b'\x52\x69\x63\x68' == b'Rich'
@@ -490,6 +491,7 @@ class ResDir:
         self.id_entries_count = int.from_bytes(struct_bytes[14:16], 'little')
         self.struct_size = 16
         self.vi = None
+        self.vi_idx = -1
         self.entries = []
 
     @property
@@ -546,6 +548,7 @@ class ResDirEntry:
         self.name_indent = name_indent
         self.name_offset = name_offset
         self.bname = entry_bname
+        self.name = entry_bname[2:].decode('utf-16') if entry_bname is not None else ''
         self.id = entry_id
         self.next_entry_indent = next_entry_indent
         self.next_entry_offset = next_entry_offset
@@ -982,7 +985,7 @@ def get_resource_entries(data, entry_offset, start_offset, offset_va_delta, eof,
 
 
 # collect all resource tables, entries and data
-def get_resource_info(data, res_dir_offset, offset_va_delta, eof, checking_original):
+def get_resource_info(data, res_dir_offset, offset_va_delta, eof, manifest_allowed, checking_original):
     prev_offsets = []
     res_dir_struct = data[res_dir_offset:res_dir_offset + 16]
     res_dir = ResDir(res_dir_offset, res_dir_struct)
@@ -996,8 +999,15 @@ def get_resource_info(data, res_dir_offset, offset_va_delta, eof, checking_origi
         entry = get_resource_entries(data, offset, res_dir_offset, offset_va_delta, eof, checking_original, prev_offsets, lvl=0)
         if entry is None:
             return None
-        if entry.id is not None and entry.id == 16:
-            res_dir.vi = entry
+        if entry.id is not None:
+            if entry.id == 16:  # VERSION_TYPE == 16
+                res_dir.vi = entry
+                res_dir.vi_idx = i
+            # ignore donor manifest if not allowed
+            elif entry.id == 24 and not checking_original and not manifest_allowed:  # MANIFEST_TYPE == 24
+                pass
+            else:
+                res_dir.entries.append(entry)
         else:
             res_dir.entries.append(entry)
         i += 1
@@ -1059,7 +1069,10 @@ def get_flat_resources(res_dir):
     lvl = 0
 
     if res_dir.vi is not None:
-        res_dir.entries.append(res_dir.vi)
+        if res_dir.vi_idx >= 0:
+            res_dir.entries.insert(res_dir.vi_idx, res_dir.vi)
+        else:
+            res_dir.entries.append(res_dir.vi)
 
     get_level_indents(res_dir, lvl_indents, lvl)
     get_flat_entries(res_dir, struct_entries, name_entries, data_entries, lvl_indents, lvl)
@@ -1070,7 +1083,7 @@ def get_flat_resources(res_dir):
 
 
 # collect all PE resources
-def get_resources(data, e_lfanew, is_64, sections, eof, checking_original=False):
+def get_resources(data, e_lfanew, is_64, sections, eof, manifest_allowed, checking_original=False):
     if is_64:
         hdr_offset = e_lfanew + 152  # Resource Directory if PE32+: e_lfanew + 4 + 20 + 128
     else:
@@ -1095,7 +1108,7 @@ def get_resources(data, e_lfanew, is_64, sections, eof, checking_original=False)
                       f'Delta offset-va:           {delta_offset_va}.'
             continue_or_exit_msg(message)
         return None
-    res_structs = get_resource_info(data, res_dir_offset, delta_offset_va, eof, checking_original)
+    res_structs = get_resource_info(data, res_dir_offset, delta_offset_va, eof, manifest_allowed, checking_original)
     return res_structs
 
 
@@ -1130,11 +1143,11 @@ def update_checksum_py(data):
 
 # update PE checksum
 def update_checksum(data, parts):
-    global USE_CHECKSUM_DLL, DLL_CHECKSUM_FUNC, CHECKSUM_32_DLL_NAME, CHECKSUM_64_DLL_NAME
+    global USE_CHECKSUM_DLL, DLL_CHECKSUM_FUNC, CHECKSUM_32_DLL_NAME, CHECKSUM_64_DLL_NAME, INTERPRETER_IS_64
     parts['chs'] = 'Checksum updated.'
     if USE_CHECKSUM_DLL is None:
         module_path = os.path.dirname(os.path.abspath(__file__))
-        if sys.maxsize > 2**32:  # python interpreter is 64 bit
+        if INTERPRETER_IS_64:  # python interpreter is 64 bit
             dll_path = os.path.join(module_path, CHECKSUM_64_DLL_NAME)
         else:
             dll_path = os.path.join(module_path, CHECKSUM_32_DLL_NAME)
@@ -2079,6 +2092,14 @@ def set_out_path(dst, pe_name):
     return testsavepath
 
 
+def no_search_include_selected(args):
+    return not any([args.rich, args.timePE, args.sign, args.vi, args.dbg, args.res, args.imp, args.names])
+
+
+def all_search_exclude_selected(args):
+    return all([args.no_rich, args.no_timePE, args.no_sign, args.no_vi, args.no_dbg, args.no_res, args.no_imp, args.no_names])
+
+
 # check arguments
 def check_args(args):
     global SYS_DRIVE
@@ -2110,12 +2131,13 @@ def check_args(args):
     if args.depth < 0:
         exit_program(f'Invalid value for "-d": {args.d}.')
     # check excluded parts
-    if all([args.no_rich, args.no_timePE, args.no_sign, args.no_vi, args.no_dbg, args.no_res, args.no_imp, args.no_names]):
+    if all_search_exclude_selected(args):
         exit_program('All attributes removed, nothing to search.', 0)
     # check capstone module for "-imp" option
-    if args.imp and capstone is None:
+    if capstone is None and (args.imp or (no_search_include_selected(args) and not args.no_imp)):
         message = 'Import shuffling ("-imp") option needs capstone module, which does not installed.\n' \
-                  'Use "pip install capstone" command to add module.'
+                  'Use "pip install capstone" command to add module.\n' \
+                  'Or use "-no-imp" switch.'
         exit_program(message)
     # collect warnings
     warnings = []
@@ -2321,7 +2343,7 @@ def check_original(args):
 
     # check original resources
     if any([Options.search_res, Options.search_vi, Options.remove_vi, Options.search_dbg and args.store_dbg_to_rsrc]):
-        orig_res = get_resources(data, e_lfanew, is_64, orig_sections, pe_size, checking_original=True)
+        orig_res = get_resources(data, e_lfanew, is_64, orig_sections, pe_size, args.manifest_allowed, checking_original=True)
         if orig_res is None:
             if Options.search_res:
                 Options.search_res = False
@@ -2530,7 +2552,7 @@ def get_donor(pe, donor_path, args):
             score += 1
     donor_res = None
     if Options.search_res or Options.search_vi:
-        donor_res = get_resources(data, e_lfanew, is_64, donor_sections, size)
+        donor_res = get_resources(data, e_lfanew, is_64, donor_sections, size, args.manifest_allowed)
         if Options.search_res and donor_res:
             score += 1
         if Options.search_vi and donor_res and donor_res.vi:
@@ -2932,6 +2954,7 @@ if __name__ == '__main__':
     parser.add_argument('-no-rich-fix', dest='no_rich_fix', action='store_true', help='disable modifying Rich Header values.')
     parser.add_argument('-no-dbg-rsrc', dest='store_dbg_to_rsrc', action='store_false',
                         help='do not add Debug Info to the resources if it is missing or does not fit in size.')
+    parser.add_argument('-res-manifest', dest='manifest_allowed', action='store_true', help='allow adding donor manifest.')
     parser.add_argument('-no-checksum', dest='upd_checksum', action='store_false', help='do not update the checksum.')
     initargs = parser.parse_args()
 
